@@ -89,6 +89,16 @@ typedef struct {
 } fastData_t;
 
 typedef struct {
+  uint16_t enable;           // SW write: 1 = enable ELS stop feature
+  uint16_t scaleIndex;       // SW write: which scale (0–3) is the position reference
+  int32_t  stopPosition;     // SW write: threshold in encoder counts
+  int16_t  stopDirection;    // SW write: 1 = stop when pos >= threshold, -1 = stop when pos <= threshold
+  uint16_t active;           // Firmware sets to 1 when triggered; SW writes 0 to resume
+  int32_t  accumulatedError; // Firmware-maintained: integer sync steps withheld while stopped
+  float    threadPitchSteps; // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
+} elsStop_t;
+
+typedef struct {
   uint32_t executionInterval;
   uint32_t executionIntervalPrevious;
   uint32_t executionIntervalCurrent;
@@ -96,6 +106,7 @@ typedef struct {
   servo_t servo;
   input_t scales[SCALES_COUNT];
   fastData_t fastData;
+  elsStop_t elsStop;
 } rampsSharedData_t;
 
 
@@ -112,6 +123,7 @@ typedef struct {
   deltaPosError_t scalesSpeed[SCALES_COUNT];
   deltaPosError_t rampsDeltaPos;
   uint32_t servoPreviousDirection;
+  uint16_t elsStopPreviousActive;
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

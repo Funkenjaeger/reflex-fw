@@ -253,12 +253,48 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
     // request motion only if sync is enabled
     if (shared->scales[i].syncEnable != 0) {
-      shared->servo.desiredSteps += data->scalesSyncDeltaPos[i].scaledDelta;
+      // Check ELS stop trigger (only latch when not already active)
+      if (!shared->elsStop.active && shared->elsStop.enable) {
+        int32_t refPos = shared->scales[shared->elsStop.scaleIndex].position;
+        bool shouldStop = (shared->elsStop.stopDirection >= 0)
+                          ? (refPos >= shared->elsStop.stopPosition)
+                          : (refPos <= shared->elsStop.stopPosition);
+        if (shouldStop) {
+          shared->elsStop.active = 1;
+          shared->elsStop.accumulatedError = 0;
+        }
+      }
+
+      if (shared->elsStop.active) {
+        shared->elsStop.accumulatedError += data->scalesSyncDeltaPos[i].scaledDelta;
+      } else {
+        shared->servo.desiredSteps += data->scalesSyncDeltaPos[i].scaledDelta;
+      }
     }
 
     // Update fastData current position
     shared->fastData.scaleCurrent[i] = shared->scales[i].position;
   }
+
+  // Detect SW clearing elsStop.active (1→0) to apply re-sync correction on resume
+  if (data->elsStopPreviousActive && !shared->elsStop.active) {
+    if (shared->elsStop.threadPitchSteps != 0.0f) {
+      float totalError = (float)shared->elsStop.accumulatedError;
+      for (int j = 0; j < SCALES_COUNT; j++) {
+        if (shared->scales[j].syncEnable && shared->scales[j].syncRatioDen != 0) {
+          totalError += (float)data->scalesSyncDeltaPos[j].error
+                        / (float)shared->scales[j].syncRatioDen;
+        }
+      }
+      float pitch = shared->elsStop.threadPitchSteps;
+      float correction = fmodf(totalError, pitch);
+      if (correction >  pitch / 2.0f) correction -= pitch;
+      if (correction < -pitch / 2.0f) correction += pitch;
+      shared->servo.stepsToGo += (int32_t)lroundf(correction);
+    }
+    shared->elsStop.accumulatedError = 0;
+  }
+  data->elsStopPreviousActive = shared->elsStop.active;
 
   if (shared->fastData.servoMode == 1) updateIndexingPosition(data);
   if (shared->fastData.servoMode == 2) updateJogPosition(data);
@@ -373,7 +409,7 @@ _Noreturn void servoEnableTask(void *argument) {
       anySyncMotionEnabled = anySyncMotionEnabled || (shared->scales[i].syncEnable != 0);
     }
 
-    if (anySyncMotionEnabled && rampsData->shared.fastData.servoMode != 2)
+    if (anySyncMotionEnabled && !shared->elsStop.active && rampsData->shared.fastData.servoMode != 2)
       rampsData->shared.fastData.servoMode = 1;
 
     rampsData->shared.fastData.servoSpeed = (float)(int32_t)(rampsData->shared.servo.currentSteps - previousPosition) * 10;
