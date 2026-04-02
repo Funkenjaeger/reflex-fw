@@ -58,51 +58,51 @@ typedef struct {
 } deltaPosError_t;
 
 typedef struct {
-  TIM_HandleTypeDef *timerHandle;
-  int32_t position;
-  int32_t speed;
-  int32_t syncRatioNum, syncRatioDen;
-  uint16_t syncEnable;
+  TIM_HandleTypeDef *timerHandle;      // init-only: set before RampsStart(); must not be written via Modbus
+  int32_t position;                    // READ-ONLY (firmware-owned): absolute encoder position, updated by ISR
+  int32_t speed;                       // READ-ONLY (firmware-owned): encoder speed (counts/s), updated by updateSpeedTask
+  int32_t syncRatioNum, syncRatioDen;  // SW write: sync ratio numerator/denominator (output steps per input count)
+  uint16_t syncEnable;                 // SW write: 0 = sync disabled, non-zero = sync enabled for this scale
 } input_t;
 
 typedef struct {
-  float maxSpeed;
-  float currentSpeed;
-  float jogSpeed;
-  float acceleration;
-  int32_t stepsToGo;
-  uint32_t destinationSteps;
-  uint32_t currentSteps;
-  uint32_t desiredSteps;
+  float maxSpeed;              // SW write: maximum step rate (steps/s); clamped to 100000 by firmware
+  float currentSpeed;          // READ-ONLY (firmware-owned): live ramp speed, managed by ramp algorithm
+  float jogSpeed;              // SW write: jog target speed (steps/s); negative = reverse
+  float acceleration;          // SW write: ramp acceleration (steps/s²)
+  int32_t stepsToGo;          // SW write: remaining steps for indexing move; firmware decrements toward zero
+  uint32_t destinationSteps;  // SW write: absolute destination step count for indexing mode
+  uint32_t currentSteps;      // READ-ONLY (firmware-owned): step counter incremented/decremented by ISR
+  uint32_t desiredSteps;      // READ-ONLY (firmware-owned): accumulated target steps, driven by sync/ramp
 } servo_t;
 
 typedef struct {
-  uint32_t servoCurrent;
-  uint32_t servoDesired;
-  uint32_t stepsToGo;
-  float servoSpeed;
-  int32_t scaleCurrent[SCALES_COUNT];
-  int32_t scaleSpeed[SCALES_COUNT];
-  uint32_t cycles;
-  uint32_t executionInterval;
-  uint16_t servoMode; // Servo modes: 0=disabled, 1=sync/index, 2=jog
+  uint32_t servoCurrent;               // READ-ONLY (firmware-owned): mirror of servo.currentSteps, updated by updateSpeedTask
+  uint32_t servoDesired;               // READ-ONLY (firmware-owned): mirror of servo.desiredSteps, updated by updateSpeedTask
+  uint32_t stepsToGo;                  // READ-ONLY (firmware-owned): mirror of servo.stepsToGo, updated by ramp algorithm
+  float servoSpeed;                    // READ-ONLY (firmware-owned): output step rate (steps/100ms), updated by servoEnableTask
+  int32_t scaleCurrent[SCALES_COUNT];  // READ-ONLY (firmware-owned): mirror of scales[i].position, updated by ISR
+  int32_t scaleSpeed[SCALES_COUNT];    // READ-ONLY (firmware-owned): mirror of scales[i].speed, updated by updateSpeedTask
+  uint32_t cycles;                     // READ-ONLY (firmware-owned): ISR execution time in CPU cycles, updated by updateSpeedTask
+  uint32_t executionInterval;          // READ-ONLY (firmware-owned): ISR interval in CPU cycles, updated by ISR
+  uint16_t servoMode;                  // SW write: 0=disabled, 1=sync/index (also set by firmware), 2=jog
 } fastData_t;
 
 typedef struct {
-  uint16_t enable;           // SW write: 1 = enable ELS stop feature
-  uint16_t scaleIndex;       // SW write: which scale (0–3) is the position reference
-  int32_t  stopPosition;     // SW write: threshold in encoder counts
-  int16_t  stopDirection;    // SW write: 1 = stop when pos >= threshold, -1 = stop when pos <= threshold
-  uint16_t active;           // Firmware sets to 1 when triggered; SW writes 0 to resume
-  int32_t  accumulatedError; // Firmware-maintained: integer sync steps withheld while stopped
-  float    threadPitchSteps; // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
+  uint16_t enable;            // SW write: 1 = enable ELS stop feature
+  uint16_t scaleIndex;        // SW write: which scale (0–3) is the position reference
+  int32_t  stopPosition;      // SW write: threshold in encoder counts
+  int16_t  stopDirection;     // SW write: 1 = stop when pos >= threshold, -1 = stop when pos <= threshold
+  uint16_t active;            // bidirectional: firmware sets to 1 when triggered; SW writes 0 to resume
+  int32_t  accumulatedError;  // READ-ONLY (firmware-owned): sync steps withheld while stopped; reset on resume
+  float    threadPitchSteps;  // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
 } elsStop_t;
 
 typedef struct {
-  uint32_t executionInterval;
-  uint32_t executionIntervalPrevious;
-  uint32_t executionIntervalCurrent;
-  uint32_t executionCycles;
+  uint32_t executionInterval;          // READ-ONLY (firmware-owned): ISR period in CPU cycles (current - previous timestamp)
+  uint32_t executionIntervalPrevious;  // READ-ONLY (firmware-owned): DWT timestamp of previous ISR entry
+  uint32_t executionIntervalCurrent;   // READ-ONLY (firmware-owned): DWT timestamp of current ISR entry
+  uint32_t executionCycles;            // READ-ONLY (firmware-owned): ISR wall-clock duration in CPU cycles
   servo_t servo;
   input_t scales[SCALES_COUNT];
   fastData_t fastData;
