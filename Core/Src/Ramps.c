@@ -336,12 +336,10 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
 }
 
 void SynchroRefreshTimerIsr(rampsHandler_t *data) {
-//  HAL_GPIO_TogglePin(SPARE_1_GPIO_PORT, SPARE_1_PIN);
-//  HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_1_PIN, GPIO_PIN_SET);
   uint32_t start = DWT->CYCCNT;
   // Reset the step pin as soon as possible
   HAL_GPIO_WritePin(STEP_GPIO_PORT, STEP_PIN, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(STEP_GPIO_PORT, SPARE_2_PIN, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_2_PIN, GPIO_PIN_RESET);
   rampsSharedData_t *shared = &(data->shared);
   shared->executionIntervalPrevious = shared->executionIntervalCurrent;
   shared->executionIntervalCurrent = DWT->CYCCNT;
@@ -480,7 +478,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
     if (direction == data->servoPreviousDirection && change != 0) {
       HAL_GPIO_WritePin(STEP_GPIO_PORT, STEP_PIN, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(STEP_GPIO_PORT, SPARE_2_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_2_PIN, GPIO_PIN_SET);
       shared->servo.currentSteps += direction;
 #ifdef EMULATOR_BUILD
       if (emu_step6_active) {
@@ -527,7 +525,6 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 #endif
 
   shared->executionCycles = DWT->CYCCNT - start;
-  HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_1_PIN, GPIO_PIN_RESET);
 }
 
 _Noreturn void userLedTask(__attribute__((unused)) void *argument) {
