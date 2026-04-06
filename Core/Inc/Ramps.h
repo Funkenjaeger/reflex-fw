@@ -124,6 +124,7 @@ typedef struct {
   deltaPosError_t rampsDeltaPos;
   uint32_t servoPreviousDirection;
   uint16_t elsStopPreviousActive;
+  uint32_t elsStopStepsAtStop;  // desiredSteps snapshot taken when elsStop.active is latched
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

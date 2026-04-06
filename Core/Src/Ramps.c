@@ -262,6 +262,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         if (shouldStop) {
           shared->elsStop.active = 1;
           shared->elsStop.accumulatedError = 0;
+          data->elsStopStepsAtStop = shared->servo.desiredSteps;
         }
       }
 
@@ -279,7 +280,11 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   // Detect SW clearing elsStop.active (1→0) to apply re-sync correction on resume
   if (data->elsStopPreviousActive && !shared->elsStop.active) {
     if (shared->elsStop.threadPitchSteps != 0.0f) {
-      float totalError = (float)shared->elsStop.accumulatedError;
+      // Jog displacement: any desiredSteps change while stopped (negative = jogged back)
+      float jogDisplacement = (float)(int32_t)(shared->servo.desiredSteps - data->elsStopStepsAtStop);
+      // TODO: sanity check sign on this
+      // TODO: consider handling corner case where jog is still going (hasn't reached desiredSteps yet)
+      float totalError = (float)shared->elsStop.accumulatedError - jogDisplacement;
       for (int j = 0; j < SCALES_COUNT; j++) {
         if (shared->scales[j].syncEnable && shared->scales[j].syncRatioDen != 0) {
           totalError += (float)data->scalesSyncDeltaPos[j].error
