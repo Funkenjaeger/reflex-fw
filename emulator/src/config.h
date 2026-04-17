@@ -28,6 +28,7 @@ struct EmuConfig {
     double z_min_mm;
     double z_initial_mm;
     bool   z_half_nut_engaged;
+    bool   z_forward_is_negative;  /* true: DIR pin SET moves carriage in -Z direction */
 
     /* [cross_slide] */
     double x_encoder_counts_per_mm;
@@ -61,6 +62,13 @@ struct EmuConfig {
     /* [simulation] */
     int    isr_rate_hz;
     bool   realtime;
+
+    /* [els_stop] */
+    int    els_stop_enable;
+    int    els_stop_scale_index;
+    int    els_stop_position;
+    int    els_stop_direction;
+    int    els_stop_hysteresis;
 
     /* Set defaults */
     EmuConfig();

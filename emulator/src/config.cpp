@@ -30,6 +30,7 @@ EmuConfig::EmuConfig() {
     z_min_mm = -5.0;
     z_initial_mm = 0.0;
     z_half_nut_engaged = false;
+    z_forward_is_negative = true;
 
     x_encoder_counts_per_mm = 400.0;
     x_max_mm = 100.0;
@@ -57,6 +58,12 @@ EmuConfig::EmuConfig() {
 
     isr_rate_hz = 10000;
     realtime = true;
+
+    els_stop_enable = 0;
+    els_stop_scale_index = 0;
+    els_stop_position = 0;
+    els_stop_direction = 1;
+    els_stop_hysteresis = 0;
 }
 
 static std::string trim(const std::string &s) {
@@ -147,6 +154,7 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
     cfg.z_min_mm = getDouble("z_axis.min_position_mm", cfg.z_min_mm);
     cfg.z_initial_mm = getDouble("z_axis.initial_position_mm", cfg.z_initial_mm);
     cfg.z_half_nut_engaged = getBool("z_axis.half_nut_engaged", cfg.z_half_nut_engaged);
+    cfg.z_forward_is_negative = getBool("z_axis.forward_is_negative", cfg.z_forward_is_negative);
 
     cfg.x_encoder_counts_per_mm = getDouble("cross_slide.encoder_counts_per_mm", cfg.x_encoder_counts_per_mm);
     cfg.x_max_mm = getDouble("cross_slide.max_position_mm", cfg.x_max_mm);
@@ -174,6 +182,12 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
 
     cfg.isr_rate_hz = getInt("simulation.isr_rate_hz", cfg.isr_rate_hz);
     cfg.realtime = getBool("simulation.realtime", cfg.realtime);
+
+    cfg.els_stop_enable = getInt("els_stop.enable", cfg.els_stop_enable);
+    cfg.els_stop_scale_index = getInt("els_stop.scale_index", cfg.els_stop_scale_index);
+    cfg.els_stop_position = getInt("els_stop.position", cfg.els_stop_position);
+    cfg.els_stop_direction = getInt("els_stop.direction", cfg.els_stop_direction);
+    cfg.els_stop_hysteresis = getInt("els_stop.hysteresis", cfg.els_stop_hysteresis);
 
     std::cout << "Config loaded from " << path << "\n";
     return true;

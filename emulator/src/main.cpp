@@ -40,7 +40,7 @@ static void signalHandler(int sig) {
  * ISR thread: ticks the physics model and calls the firmware's
  * SynchroRefreshTimerIsr at the configured rate.
  */
-static void isrThreadFunc(LathePhysics *physics, rampsHandler_t *rampsData, int rate_hz) {
+static void isrThreadFunc(LathePhysics *physics, rampsHandler_t *rampsData, int rate_hz, int z_dir_sign) {
     auto interval = std::chrono::microseconds(1000000 / rate_hz);
     auto next_tick = std::chrono::steady_clock::now();
 
@@ -75,7 +75,7 @@ static void isrThreadFunc(LathePhysics *physics, rampsHandler_t *rampsData, int 
 
         /* Detect STEP rising edge and feed into physics */
         if (emu_hw.step_pin && !prev_step_pin) {
-            int dir = emu_hw.dir_pin ? 1 : -1;
+            int dir = emu_hw.dir_pin ? z_dir_sign : -z_dir_sign;
             physics->onStepPulse(dir);
         }
         prev_step_pin = emu_hw.step_pin;
@@ -140,6 +140,13 @@ int main(int argc, char *argv[]) {
     rampsData.shared.servo.maxSpeed = (float)cfg.servo_max_speed;
     rampsData.shared.servo.acceleration = (float)cfg.servo_acceleration;
 
+    /* Apply config defaults to elsStop */
+    rampsData.shared.elsStop.enable = (uint16_t)cfg.els_stop_enable;
+    rampsData.shared.elsStop.scaleIndex = (uint16_t)cfg.els_stop_scale_index;
+    rampsData.shared.elsStop.stopPosition = (int32_t)cfg.els_stop_position;
+    rampsData.shared.elsStop.stopDirection = (int16_t)cfg.els_stop_direction;
+    rampsData.shared.elsStop.hysteresis = (int32_t)cfg.els_stop_hysteresis;
+
     /* Default sync ratios */
     for (int i = 0; i < SCALES_COUNT; i++) {
         rampsData.shared.scales[i].syncRatioNum = 1;
@@ -176,7 +183,8 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
 
     /* Start ISR thread */
-    std::thread isrThread(isrThreadFunc, &physics, &rampsData, cfg.isr_rate_hz);
+    int z_dir_sign = cfg.z_forward_is_negative ? -1 : 1;
+    std::thread isrThread(isrThreadFunc, &physics, &rampsData, cfg.isr_rate_hz, z_dir_sign);
 
     /* Run dashboard on main thread */
     Dashboard dashboard(cfg, physics, transport, rampsData.shared);
