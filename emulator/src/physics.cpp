@@ -40,8 +40,7 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
     carriage_mm = cfg.z_initial_mm;
     half_nut_state = cfg.z_half_nut_engaged ? ENGAGED : DISENGAGED;
     half_nut_request_pending = false;
-    backlash_remaining = 0.0;
-    last_carriage_dir = 1;
+    backlash_offset = z_backlash_mm;  /* assume nut starts on "+ wall" so first +Z motion drives carriage */
 
     cross_slide_mm = cfg.x_initial_mm;
 
@@ -236,27 +235,24 @@ void LathePhysics::onStepPulse(int direction) {
     leadscrew_position_mm += direction * leadscrew_mm_per_step;
 
     if (half_nut_state == ENGAGED) {
+        /* Faithful (non-lossy) backlash model: track nut position within play window
+         * [0, z_backlash_mm]. Carriage only moves when nut hits a wall and pushes.
+         * Partial reversals only consume the actual traversal distance. */
         double move = direction * leadscrew_mm_per_step;
+        double new_offset = backlash_offset + move;
 
-        /* Backlash model: direction reversal eats backlash before moving */
-        if (direction != last_carriage_dir && last_carriage_dir != 0) {
-            backlash_remaining = z_backlash_mm;
+        if (new_offset > z_backlash_mm) {
+            /* Hit the +wall: overshoot drives carriage forward */
+            carriage_mm += new_offset - z_backlash_mm;
+            new_offset = z_backlash_mm;
+        } else if (new_offset < 0.0) {
+            /* Hit the -wall: overshoot drives carriage backward */
+            carriage_mm += new_offset;  /* new_offset is negative */
+            new_offset = 0.0;
         }
+        backlash_offset = new_offset;
 
-        if (backlash_remaining > 0.0) {
-            backlash_remaining -= std::abs(move);
-            if (backlash_remaining <= 0.0) {
-                /* Backlash absorbed; apply the overshoot */
-                move = -backlash_remaining * (direction > 0 ? 1.0 : -1.0);
-                backlash_remaining = 0.0;
-            } else {
-                move = 0.0;  /* Still in backlash zone */
-            }
-        }
-
-        carriage_mm += move;
         carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
-        last_carriage_dir = direction;
     }
 }
 

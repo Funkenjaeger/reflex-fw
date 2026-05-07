@@ -90,8 +90,7 @@ private:
     double carriage_mm;
     HalfNutState half_nut_state;
     bool   half_nut_request_pending;
-    double backlash_remaining;
-    int    last_carriage_dir;  /* +1 or -1, for backlash */
+    double backlash_offset;    /* nut position within play window: [0, z_backlash_mm] */
 
     /* Cross-slide state */
     double cross_slide_mm;
