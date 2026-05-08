@@ -230,48 +230,39 @@ void Dashboard::drawStatePane(int startRow, int startCol, int width) {
 
     LINE("%s", "");
 
-    /* Assisted Threading registers */
-    LINE(BOLD " ASSISTED THREADING" RESET_ATTR);
-    {
-        auto &at = shared.assistedThreadingData;
-        const char *active_str = at.threadPhaseActive ? FG_GREEN "LATCHED" RESET_ATTR : DIM "idle" RESET_ATTR;
-        LINE(" req:%d rst:%d ena:%d %s",
-             at.threadRequest, at.threadReset, at.threadEnabled, active_str);
-        LINE(" scale:%d  tol:%d  CPR:%u",
-             at.spindleScaleIndex, at.spindlePhaseTolerance,
-             at.spindleCountsPerRev);
-        LINE(" remain:%d  start:%u",
-             at.threadRemainingSteps, at.threadStartSteps);
-        LINE(" phaseRef:%d  curPhase:%d",
-             at.threadPhaseRef, at.currentThreadPhase);
-    }
-
-    LINE("%s", "");
-
     /* ELS Stop registers */
     LINE(BOLD " ELS STOP" RESET_ATTR);
     {
         auto &es = shared.elsStop;
         const char *ena_str = es.enable ? FG_GREEN "ON" RESET_ATTR : DIM "off" RESET_ATTR;
-        const char *act_str = es.active ? FG_RED "STOPPED" RESET_ATTR : DIM "idle" RESET_ATTR;
+        const char *act_str;
+        if (es.active)              act_str = FG_RED "STOPPED" RESET_ATTR;
+        else if (es.takeupPending)  act_str = FG_YELLOW "TAKEUP" RESET_ATTR;
+        else                        act_str = DIM "idle" RESET_ATTR;
         LINE(" enable:%s  scale:%d  %s",
              ena_str, es.scaleIndex, act_str);
         LINE(" stopPos:%d  dir:%d",
              es.stopPosition, es.stopDirection);
-        LINE(" accumErr:%d  pitch:%.1f",
-             es.accumulatedError, (double)es.threadPitchSteps);
-        {
-            int32_t raw = shared.elsStop.latchedSpindleEncoder;
-            if (raw == INT32_MIN) {
-                LINE(" latchedPhase: -1");
-            } else if (cfg.spindle_counts_per_rev > 0) {
-                int32_t phase = raw % cfg.spindle_counts_per_rev;
+        LINE(" pitch:%.1f  zCpP:%.1f  backlash:%d",
+             (double)es.threadPitchSteps, (double)es.zCountsPerPitch, es.backlashSteps);
+        if (es.referenceLatched) {
+            if (cfg.spindle_counts_per_rev > 0) {
+                int32_t phase = es.latchedSpindle % cfg.spindle_counts_per_rev;
                 if (phase < 0) phase += cfg.spindle_counts_per_rev;
-                LINE(" latchedPhase: %d/%d", (int)phase, cfg.spindle_counts_per_rev);
+                LINE(" latchedZ:%d  latchedSpindle:%d (phase %d/%d)",
+                     es.latchedZ, es.latchedSpindle,
+                     (int)phase, cfg.spindle_counts_per_rev);
             } else {
-                LINE(" latchedPhase: %d (raw)", (int)raw);
+                LINE(" latchedZ:%d  latchedSpindle:%d",
+                     es.latchedZ, es.latchedSpindle);
             }
+        } else {
+            LINE(" reference: %s", DIM "not latched" RESET_ATTR);
         }
+        LINE(" lastIdeal:%.2f  lastActual:%.2f",
+             (double)es.lastIdealAdvance, (double)es.lastActualAdvance);
+        LINE(" lastPhaseErr:%.2f  lastCorr:%.2f",
+             (double)es.lastPhaseError, (double)es.lastCorrection);
     }
 
     LINE("%s", "");

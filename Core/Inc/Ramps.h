@@ -90,14 +90,22 @@ typedef struct {
 
 typedef struct {
   uint16_t enable;            // SW write: 1 = enable ELS stop feature
-  uint16_t scaleIndex;        // SW write: which scale (0–3) is the position reference
+  uint16_t scaleIndex;        // SW write: which scale (0–3) is the position reference (Z axis)
   int32_t  stopPosition;      // SW write: threshold in encoder counts
   int16_t  stopDirection;     // SW write: 1 = stop when pos >= threshold, -1 = stop when pos <= threshold
   uint16_t active;            // bidirectional: firmware sets to 1 when triggered; SW writes 0 to resume
-  int32_t  accumulatedError;  // READ-ONLY (firmware-owned): sync steps withheld while stopped; reset on resume
   float    threadPitchSteps;  // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
   int32_t  hysteresis;        // SW write: encoder counts carriage must retract before re-enabling; 0 = no hysteresis
-  int32_t  latchedSpindleEncoder;  // READ-ONLY (firmware-owned): scales[0].position at stop trigger; INT32_MIN = no stop yet
+  float    zCountsPerPitch;   // SW write: Z scale encoder counts per thread pitch; 0.0f = correction disabled
+  int32_t  backlashSteps;     // SW write: signed leadscrew backlash takeup in servo steps; sign = cutting direction; 0 = takeup disabled
+  int32_t  latchedZ;          // READ-ONLY (firmware-owned): scales[scaleIndex].position at first trigger of the job
+  int32_t  latchedSpindle;    // READ-ONLY (firmware-owned): scales[0].position at first trigger of the job
+  uint16_t referenceLatched;  // READ-ONLY (firmware-owned): 0 until first trigger captures the reference, 1 thereafter; reset on enable 0→1
+  uint16_t takeupPending;     // READ-ONLY (firmware-owned): 1 while the post-resume backlash takeup move is executing
+  float    lastIdealAdvance;  // READ-ONLY (firmware-owned): last resume's deltaSpindle × syncRatioNum / syncRatioDen
+  float    lastActualAdvance; // READ-ONLY (firmware-owned): last resume's deltaZ × threadPitchSteps / zCountsPerPitch
+  float    lastPhaseError;    // READ-ONLY (firmware-owned): last resume's idealAdvance − actualAdvance (pre-modulo)
+  float    lastCorrection;    // READ-ONLY (firmware-owned): last resume's correction added to stepsToGo (post-modulo)
 } elsStop_t;
 
 typedef struct {
@@ -126,7 +134,8 @@ typedef struct {
   deltaPosError_t rampsDeltaPos;
   uint32_t servoPreviousDirection;
   uint16_t elsStopPreviousActive;
-  uint32_t elsStopStepsAtStop;  // desiredSteps snapshot taken when elsStop.active is latched
+  uint16_t elsStopPreviousEnable;
+  int32_t  elsStopTakeupTargetSteps;  // servo.currentSteps target value at end of post-resume backlash takeup
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

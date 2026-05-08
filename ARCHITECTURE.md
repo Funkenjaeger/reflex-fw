@@ -107,27 +107,35 @@ Fractional remainders are tracked per-axis to prevent accumulated positioning er
 
 ### ELS Shoulder Stop
 
-Position-based automatic stop for turning or threading to a shoulder, with phase-preserving re-sync on resume.
+Position-based automatic stop for turning or threading to a shoulder, with phase-preserving re-sync on resume. The re-sync uses a **(Z position, spindle position) reference pair** captured at the *first* stop trigger of a threading job, plus a **deterministic backlash takeup** before the phase math runs. This lets the operator retract — or even open the half-nut and reposition the carriage manually — between passes without disturbing thread phase on resume.
 
-**On trigger** (selected scale crosses `stopPosition`): firmware latches `active = 1`, snapshots `desiredSteps → elsStopStepsAtStop`, captures `scales[0].position → latchedSpindleEncoder`, resets `accumulatedError = 0`.
+**Reference latch.** On `enable` 0→1 (start of a new threading job), `referenceLatched` is cleared. On the *first* stop trigger thereafter, firmware captures `scales[scaleIndex].position → latchedZ` and `scales[0].position → latchedSpindle`, and sets `referenceLatched = 1`. Subsequent stop triggers in the same job reuse the same reference (they only set `active = 1`).
 
-**While latched:** integer `scaledDelta` accumulates into `accumulatedError` instead of `desiredSteps`; the fractional residue carried in `scalesSyncDeltaPos[i].error` continues to track sub-step precision. The user is free to jog the carriage (e.g. retract) via `stepsToGo`; `desiredSteps` moves accordingly. `servoEnableTask` suppresses its auto-mode-1 logic to allow this.
+**While stopped** (`active = 1`): sync is gated off — `scaledDelta` is *not* added to `desiredSteps`. The fractional residue carried in `scalesSyncDeltaPos[i].error` continues to track sub-step precision. The user is free to jog or to disengage the half-nut and move the carriage by hand; the Z scale follows the carriage.
 
-**On resume** (SW writes `active = 0`), the firmware computes a re-sync correction. The key insight: `accumulatedError` is the carriage motion sync *would have* commanded during the stop, and `(desiredSteps − elsStopStepsAtStop)` is the carriage motion that *actually* happened (i.e. the retract jog). Their difference, modulo thread pitch, is the shortest move that puts the carriage back on a pitch-aligned position relative to the spindle:
+**On resume** (SW writes `active = 0`), the firmware runs a small state machine to re-sync:
 
-```
-jogDisplacement = desiredSteps − elsStopStepsAtStop
-totalError      = accumulatedError − jogDisplacement
-                  + Σ(scalesSyncDeltaPos[j].error / syncRatioDen[j])  // sub-step residue
-correction      = fmod(totalError, threadPitchSteps)  // normalised to ±pitch/2
-stepsToGo      += round(correction)
-```
+1. **Take up backlash.** If `backlashSteps != 0`, firmware sets `takeupPending = 1`, adds `backlashSteps` to `stepsToGo`, and latches the target `currentSteps + backlashSteps`. The indexing ramp drives the leadscrew that many steps in the cutting direction. Sync stays paused (the sync gate also checks `takeupPending`). The over-takeup magnitude must be ≥ the lathe's measured backlash so the nut is *guaranteed* to land on the cutting face regardless of where it sat in the play window when resume was clicked. Z scale doesn't change during backlash takeup (the carriage is on a linear scale, not driven by the leadscrew during backlash); only the leadscrew/servo moves.
 
-The correction is applied as a small jog via `updateIndexingPosition()`, superimposed on the resumed sync motion. Because the modulo brings it within ±pitch/2, it never undoes the retract. If `threadPitchSteps = 0.0` (turning, not threading), no correction is applied.
+2. **Compute correction post-takeup.** When `currentSteps` reaches the latched target, firmware reads scales and computes:
+   ```
+   deltaSpindle  = scales[0].position − latchedSpindle
+   deltaZ        = scales[scaleIndex].position − latchedZ
+   idealAdvance  = deltaSpindle × syncRatioNum / syncRatioDen     // leadscrew steps that sync would have commanded
+   actualAdvance = deltaZ × threadPitchSteps / zCountsPerPitch    // leadscrew steps the carriage actually moved
+   phaseError    = idealAdvance − actualAdvance
+   correction    = fmod(phaseError, threadPitchSteps)             // normalised to ±pitch/2
+   stepsToGo    += round(correction)
+   ```
+   `idealAdvance` uses the spindle's existing `syncRatio` (which already encodes leadscrew-steps-per-spindle-count). `actualAdvance` uses the new `zCountsPerPitch` field to convert Z scale counts → leadscrew steps. The pitch-modulo bounds the correction to ±pitch/2 — the shortest jog that re-aligns the carriage to the thread.
+
+3. **Resume sync.** `takeupPending` is cleared and `scaledDelta` once again accumulates into `desiredSteps` on every ISR tick.
+
+If `threadPitchSteps = 0.0` or `zCountsPerPitch = 0.0` (turning, not threading), no correction or takeup is applied. If `backlashSteps = 0`, the takeup state is skipped and the correction is computed inline at the resume edge.
 
 `hysteresis` (encoder counts) optionally allows the firmware to auto-clear `active` once the carriage retracts past `stopPosition − hysteresis`, instead of requiring an SW write.
 
-Modbus-mapped fields: `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `active`, `accumulatedError`, `threadPitchSteps`, `hysteresis`, `latchedSpindleEncoder`, plus diagnostic latches (`lastAccumulatedError`, `lastJogDisplacement`, `lastTotalError`, `lastCorrection`) captured at each resume for debugging phase drift.
+**Modbus-mapped fields.** Config (SW write): `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `threadPitchSteps`, `hysteresis`, `zCountsPerPitch`, `backlashSteps`. State: `active` (bidirectional), `latchedZ`, `latchedSpindle`, `referenceLatched`, `takeupPending`. Diagnostics latched at every resume: `lastIdealAdvance`, `lastActualAdvance`, `lastPhaseError`, `lastCorrection`.
 
 ---
 

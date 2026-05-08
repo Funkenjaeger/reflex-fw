@@ -76,7 +76,8 @@ void RampsStart(rampsHandler_t *rampsData) {
     rampsData->shared.scales[i].syncRatioDen = 100;
   }
 
-  rampsData->shared.elsStop.latchedSpindleEncoder = INT32_MIN;
+  rampsData->shared.elsStop.referenceLatched = 0;
+  rampsData->shared.elsStop.takeupPending = 0;
 
   // Configure Pins
   configureOutputPin(DIR_GPIO_PORT, DIR_PIN);
@@ -226,6 +227,34 @@ static inline void updateJogPosition(rampsHandler_t *data) {
   shared->servo.desiredSteps += positionIncrement;
 }
 
+static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
+  int32_t deltaSpindle =
+    shared->scales[0].position - shared->elsStop.latchedSpindle;
+  int32_t deltaZ =
+    shared->scales[shared->elsStop.scaleIndex].position - shared->elsStop.latchedZ;
+
+  float idealAdvance =
+    (float)deltaSpindle * (float)shared->scales[0].syncRatioNum
+    / (float)shared->scales[0].syncRatioDen;
+
+  float actualAdvance =
+    (float)deltaZ * shared->elsStop.threadPitchSteps
+    / shared->elsStop.zCountsPerPitch;
+
+  float phaseError = idealAdvance - actualAdvance;
+  float pitch      = shared->elsStop.threadPitchSteps;
+  float correction = fmodf(phaseError, pitch);
+  if (correction >  pitch / 2.0f) correction -= pitch;
+  if (correction < -pitch / 2.0f) correction += pitch;
+
+  shared->servo.stepsToGo += (int32_t)lroundf(correction);
+
+  shared->elsStop.lastIdealAdvance  = idealAdvance;
+  shared->elsStop.lastActualAdvance = actualAdvance;
+  shared->elsStop.lastPhaseError    = phaseError;
+  shared->elsStop.lastCorrection    = correction;
+}
+
 void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 //  HAL_GPIO_TogglePin(SPARE_1_GPIO_PORT, SPARE_1_PIN);
 //  HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_1_PIN, GPIO_PIN_SET);
@@ -238,6 +267,20 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   shared->executionIntervalCurrent = DWT->CYCCNT;
   shared->executionInterval = shared->executionIntervalCurrent - shared->executionIntervalPrevious;
   shared->fastData.executionInterval = shared->executionInterval;
+
+  // Reset reference latch on elsStop.enable rising edge (start of a new threading job)
+  if (shared->elsStop.enable && !data->elsStopPreviousEnable) {
+    shared->elsStop.referenceLatched = 0;
+  }
+  data->elsStopPreviousEnable = shared->elsStop.enable;
+
+  // Detect completion of post-resume backlash takeup move and apply phase correction
+  if (shared->elsStop.takeupPending) {
+    if ((int32_t)shared->servo.currentSteps == data->elsStopTakeupTargetSteps) {
+      applyPhaseCorrection(shared);
+      shared->elsStop.takeupPending = 0;
+    }
+  }
 
   for (int i = 0; i < SCALES_COUNT; i++) {
     data->scalesDeltaPos[i].oldPosition = data->scalesDeltaPos[i].position;
@@ -263,15 +306,16 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
                           : (refPos <= shared->elsStop.stopPosition);
         if (shouldStop) {
           shared->elsStop.active = 1;
-          shared->elsStop.latchedSpindleEncoder = shared->scales[0].position;
-          shared->elsStop.accumulatedError = 0;
-          data->elsStopStepsAtStop = shared->servo.desiredSteps;
+          if (!shared->elsStop.referenceLatched) {
+            shared->elsStop.latchedZ         = shared->scales[shared->elsStop.scaleIndex].position;
+            shared->elsStop.latchedSpindle   = shared->scales[0].position;
+            shared->elsStop.referenceLatched = 1;
+          }
         }
       }
 
-      if (shared->elsStop.active) {
-        shared->elsStop.accumulatedError += data->scalesSyncDeltaPos[i].scaledDelta;
-      } else {
+      // Sync paused while stopped or while a backlash takeup is in progress
+      if (!shared->elsStop.active && !shared->elsStop.takeupPending) {
         shared->servo.desiredSteps += data->scalesSyncDeltaPos[i].scaledDelta;
       }
     }
@@ -280,27 +324,21 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
     shared->fastData.scaleCurrent[i] = shared->scales[i].position;
   }
 
-  // Detect SW clearing elsStop.active (1→0) to apply re-sync correction on resume
+  // Detect SW clearing elsStop.active (1→0): initiate backlash takeup, or apply correction inline
   if (data->elsStopPreviousActive && !shared->elsStop.active) {
-    if (shared->elsStop.threadPitchSteps != 0.0f) {
-      // Jog displacement: any desiredSteps change while stopped (negative = jogged back)
-      float jogDisplacement = (float)(int32_t)(shared->servo.desiredSteps - data->elsStopStepsAtStop);
-      // TODO: sanity check sign on this
-      // TODO: consider handling corner case where jog is still going (hasn't reached desiredSteps yet)
-      float totalError = (float)shared->elsStop.accumulatedError - jogDisplacement;
-      for (int j = 0; j < SCALES_COUNT; j++) {
-        if (shared->scales[j].syncEnable && shared->scales[j].syncRatioDen != 0) {
-          totalError += (float)data->scalesSyncDeltaPos[j].error
-                        / (float)shared->scales[j].syncRatioDen;
-        }
+    if (shared->elsStop.referenceLatched
+        && shared->elsStop.threadPitchSteps != 0.0f
+        && shared->elsStop.zCountsPerPitch  != 0.0f
+        && shared->scales[0].syncRatioDen   != 0) {
+      if (shared->elsStop.backlashSteps != 0) {
+        shared->servo.stepsToGo       += shared->elsStop.backlashSteps;
+        data->elsStopTakeupTargetSteps = (int32_t)shared->servo.currentSteps
+                                         + shared->elsStop.backlashSteps;
+        shared->elsStop.takeupPending  = 1;
+      } else {
+        applyPhaseCorrection(shared);
       }
-      float pitch = shared->elsStop.threadPitchSteps;
-      float correction = fmodf(totalError, pitch);
-      if (correction >  pitch / 2.0f) correction -= pitch;
-      if (correction < -pitch / 2.0f) correction += pitch;
-      shared->servo.stepsToGo += (int32_t)lroundf(correction);
     }
-    shared->elsStop.accumulatedError = 0;
   }
   data->elsStopPreviousActive = shared->elsStop.active;
 
