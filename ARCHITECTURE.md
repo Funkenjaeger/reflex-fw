@@ -107,22 +107,27 @@ Fractional remainders are tracked per-axis to prevent accumulated positioning er
 
 ### ELS Shoulder Stop
 
-Configurable position-based automatic stop for turning or threading to a shoulder. When enabled, the ISR monitors a selected axis scale encoder and latches `elsStop.active = 1` when the position crosses the configured threshold. While latched:
+Position-based automatic stop for turning or threading to a shoulder, with phase-preserving re-sync on resume.
 
-- Sync deltas are accumulated into `elsStop.accumulatedError` instead of driving the stepper — the fractional error accumulator (`scalesSyncDeltaPos[i].error`) continues updating every ISR cycle so the thread pitch relationship is preserved.
-- `servoEnableTask` suppresses its auto-mode-1 logic, allowing the user to jog or disable the motor freely.
+**On trigger** (selected scale crosses `stopPosition`): firmware latches `active = 1`, snapshots `desiredSteps → elsStopStepsAtStop`, captures `scales[0].position → latchedSpindleEncoder`, resets `accumulatedError = 0`.
 
-When SW clears `elsStop.active`, the firmware computes a correction move:
+**While latched:** integer `scaledDelta` accumulates into `accumulatedError` instead of `desiredSteps`; the fractional residue carried in `scalesSyncDeltaPos[i].error` continues to track sub-step precision. The user is free to jog the carriage (e.g. retract) via `stepsToGo`; `desiredSteps` moves accordingly. `servoEnableTask` suppresses its auto-mode-1 logic to allow this.
+
+**On resume** (SW writes `active = 0`), the firmware computes a re-sync correction. The key insight: `accumulatedError` is the carriage motion sync *would have* commanded during the stop, and `(desiredSteps − elsStopStepsAtStop)` is the carriage motion that *actually* happened (i.e. the retract jog). Their difference, modulo thread pitch, is the shortest move that puts the carriage back on a pitch-aligned position relative to the spindle:
 
 ```
-totalError = accumulatedError + Σ(scalesSyncDeltaPos[j].error / syncRatioDen[j])
-correction = fmod(totalError, threadPitchSteps)  // shortest path within ±pitch/2
-stepsToGo += round(correction)
+jogDisplacement = desiredSteps − elsStopStepsAtStop
+totalError      = accumulatedError − jogDisplacement
+                  + Σ(scalesSyncDeltaPos[j].error / syncRatioDen[j])  // sub-step residue
+correction      = fmod(totalError, threadPitchSteps)  // normalised to ±pitch/2
+stepsToGo      += round(correction)
 ```
 
-If `threadPitchSteps = 0.0` (turning rather than threading), no correction is applied. The existing `updateIndexingPosition()` ramp executes the correction move overlaid on resumed ELS operation.
+The correction is applied as a small jog via `updateIndexingPosition()`, superimposed on the resumed sync motion. Because the modulo brings it within ±pitch/2, it never undoes the retract. If `threadPitchSteps = 0.0` (turning, not threading), no correction is applied.
 
-Configuration is via Modbus registers appended to `rampsSharedData_t` (fields: `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `active`, `accumulatedError`, `threadPitchSteps`).
+`hysteresis` (encoder counts) optionally allows the firmware to auto-clear `active` once the carriage retracts past `stopPosition − hysteresis`, instead of requiring an SW write.
+
+Modbus-mapped fields: `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `active`, `accumulatedError`, `threadPitchSteps`, `hysteresis`, `latchedSpindleEncoder`, plus diagnostic latches (`lastAccumulatedError`, `lastJogDisplacement`, `lastTotalError`, `lastCorrection`) captured at each resume for debugging phase drift.
 
 ---
 
