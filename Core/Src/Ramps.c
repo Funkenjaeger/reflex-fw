@@ -76,6 +76,8 @@ void RampsStart(rampsHandler_t *rampsData) {
     rampsData->shared.scales[i].syncRatioDen = 100;
   }
 
+  rampsData->shared.elsStop.latchedSpindleEncoder = INT32_MIN;
+
   // Configure Pins
   configureOutputPin(DIR_GPIO_PORT, DIR_PIN);
   configureOutputPin(ENA_GPIO_PORT, ENA_PIN);
@@ -261,6 +263,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
                           : (refPos <= shared->elsStop.stopPosition);
         if (shouldStop) {
           shared->elsStop.active = 1;
+          shared->elsStop.latchedSpindleEncoder = shared->scales[0].position;
           shared->elsStop.accumulatedError = 0;
           data->elsStopStepsAtStop = shared->servo.desiredSteps;
         }

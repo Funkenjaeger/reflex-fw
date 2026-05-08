@@ -96,6 +96,8 @@ typedef struct {
   uint16_t active;            // bidirectional: firmware sets to 1 when triggered; SW writes 0 to resume
   int32_t  accumulatedError;  // READ-ONLY (firmware-owned): sync steps withheld while stopped; reset on resume
   float    threadPitchSteps;  // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
+  int32_t  hysteresis;        // SW write: encoder counts carriage must retract before re-enabling; 0 = no hysteresis
+  int32_t  latchedSpindleEncoder;  // READ-ONLY (firmware-owned): scales[0].position at stop trigger; INT32_MIN = no stop yet
 } elsStop_t;
 
 typedef struct {
