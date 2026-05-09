@@ -1,0 +1,27 @@
+# Normalize all text files to LF in the repository.
+# Working-tree line endings are left to each user's git config (core.autocrlf).
+* text=auto eol=lf
+
+# Explicitly mark Eclipse / STM32CubeIDE project metadata as LF text,
+# since CubeIDE on Windows likes to rewrite these with CRLF.
+*.cproject  text eol=lf
+*.project   text eol=lf
+*.mxproject text eol=lf
+*.ioc       text eol=lf
+
+# Shell and build scripts must stay LF even on Windows checkouts.
+*.sh   text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+
+# Common binary types — belt-and-suspenders; git's auto-detect already handles these.
+*.bin binary
+*.elf binary
+*.hex binary
+*.a   binary
+*.o   binary
+*.so  binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
