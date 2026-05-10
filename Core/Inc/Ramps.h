@@ -97,7 +97,7 @@ typedef struct {
   float    threadPitchSteps;  // SW write: leadscrew steps per thread pitch (float); 0.0f = turning (no correction)
   int32_t  hysteresis;        // SW write: encoder counts carriage must retract before re-enabling; 0 = no hysteresis
   float    zCountsPerPitch;   // SW write: Z scale encoder counts per thread pitch; 0.0f = correction disabled
-  int32_t  backlashSteps;     // SW write: signed leadscrew backlash takeup in servo steps; sign = cutting direction; 0 = takeup disabled
+  uint32_t backlashSteps;     // SW write: leadscrew backlash takeup magnitude in servo steps; direction derived from stopDirection × sign(threadPitchSteps × zCountsPerPitch); 0 = takeup disabled
   int32_t  latchedZ;          // READ-ONLY (firmware-owned): scales[scaleIndex].position at first trigger of the job
   int32_t  latchedSpindle;    // READ-ONLY (firmware-owned): scales[0].position at first trigger of the job
   uint16_t referenceLatched;  // READ-ONLY (firmware-owned): 0 until first trigger captures the reference, 1 thereafter; reset on enable 0→1
