@@ -107,35 +107,50 @@ Fractional remainders are tracked per-axis to prevent accumulated positioning er
 
 ### ELS Shoulder Stop
 
-Position-based automatic stop for turning or threading to a shoulder, with phase-preserving re-sync on resume. The re-sync uses a **(Z position, spindle position) reference pair** captured at the *first* stop trigger of a threading job, plus a **deterministic backlash takeup** before the phase math runs. This lets the operator retract — or even open the half-nut and reposition the carriage manually — between passes without disturbing thread phase on resume.
+#### Purpose
 
-**Reference latch.** On `enable` 0→1 (start of a new threading job), `referenceLatched` is cleared. On the *first* stop trigger thereafter, firmware captures `scales[scaleIndex].position → latchedZ` and `scales[0].position → latchedSpindle`, and sets `referenceLatched = 1`. Subsequent stop triggers in the same job reuse the same reference (they only set `active = 1`).
+Stop a synchronized cut at a specific Z position (a shoulder, a workpiece end, an annotated coordinate) and, on resume, preserve thread phase so the cutter re-enters the same helical groove on every subsequent pass — regardless of how the operator got the carriage back to the start (electronic retract, half-nut open + manual reposition + close, or any combination).
 
-**While stopped** (`active = 1`): sync is gated off — `scaledDelta` is *not* added to `desiredSteps`. The fractional residue carried in `scalesSyncDeltaPos[i].error` continues to track sub-step precision. The user is free to jog or to disengage the half-nut and move the carriage by hand; the Z scale follows the carriage.
+#### Operating model
 
-**On resume** (SW writes `active = 0`), the firmware runs a small state machine to re-sync:
+The firmware treats threading as a single *job* with potentially many passes. A job begins when software writes `enable = 1` and ends when software writes `enable = 0`. Within a job, all passes share one reference frame.
 
-1. **Take up backlash.** `backlashSteps` is an unsigned magnitude; the cutting direction in servo-step terms is derived from `sign(stopDirection × threadPitchSteps × zCountsPerPitch)` (the same sign convention `applyPhaseCorrection` uses to convert Z motion to leadscrew motion). If `backlashSteps != 0`, firmware sets `takeupPending = 1`, adds the signed takeup (`±backlashSteps` in the cutting direction) to `stepsToGo`, and latches the target `currentSteps + signedTakeup`. The indexing ramp drives the leadscrew that many steps in the cutting direction. Sync stays paused (the sync gate also checks `takeupPending`). The over-takeup magnitude must be ≥ the lathe's measured backlash so the nut is *guaranteed* to land on the cutting face regardless of where it sat in the play window when resume was clicked. Z scale doesn't change during backlash takeup (the carriage is on a linear scale, not driven by the leadscrew during backlash); only the leadscrew/servo moves.
+A pass has three logical phases:
 
-2. **Compute correction post-takeup.** When `currentSteps` reaches the latched target, firmware reads scales and computes:
-   ```
-   deltaSpindle  = scales[0].position − latchedSpindle
-   deltaZ        = scales[scaleIndex].position − latchedZ
-   idealAdvance  = deltaSpindle × syncRatioNum / syncRatioDen     // leadscrew steps that sync would have commanded
-   actualAdvance = deltaZ × threadPitchSteps / zCountsPerPitch    // leadscrew steps the carriage actually moved
-   phaseError    = idealAdvance − actualAdvance
-   correction    = fmod(phaseError, threadPitchSteps)             // normalised to ±pitch/2
-   stepsToGo    += round(correction)
-   ```
-   `idealAdvance` uses the spindle's existing `syncRatio` (which already encodes leadscrew-steps-per-spindle-count). `actualAdvance` uses the new `zCountsPerPitch` field to convert Z scale counts → leadscrew steps. The pitch-modulo bounds the correction to ±pitch/2 — the shortest jog that re-aligns the carriage to the thread.
+- **Cut.** Sync is active. Each spindle encoder tick produces a fractional-step contribution to the leadscrew's target position, with integer truncation and remainder tracking so that average tracking error stays near zero. The carriage advances toward the configured stop position.
+- **Trigger.** When the Z scale crosses the stop position in the configured direction, the firmware atomically sets `active = 1` (gating sync off) and, on the *first* such trigger of the job, latches a reference pair: the spindle position and the Z position at that instant. Subsequent triggers in the same job set `active = 1` but do not re-latch — the original reference is what defines this job's thread.
+- **Resume.** Software clears `active` when the operator is ready to start the next pass. This 1→0 transition is where the re-sync math runs.
 
-3. **Resume sync.** `takeupPending` is cleared and `scaledDelta` once again accumulates into `desiredSteps` on every ISR tick.
+#### Re-sync mechanism
 
-If `threadPitchSteps = 0.0` or `zCountsPerPitch = 0.0` (turning, not threading), no correction or takeup is applied. If `backlashSteps = 0`, the takeup state is skipped and the correction is computed inline at the resume edge.
+Between the trigger and the resume, the operator can do almost anything — jog the carriage electronically, open the half-nut, hand-wheel the carriage to a different location, snap the half-nut closed at a thread-incompatible position. The spindle keeps rotating freely throughout. By the time `active` clears, the carriage may be anywhere, and the leadscrew may be anywhere relative to where pure uninterrupted sync would have placed it.
 
-`hysteresis` (encoder counts) optionally allows the firmware to auto-clear `active` once the carriage retracts past `stopPosition − hysteresis`, instead of requiring an SW write.
+The re-sync computes two quantities, both expressed in *leadscrew step equivalents*:
 
-**Modbus-mapped fields.** Config (SW write): `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `threadPitchSteps`, `hysteresis`, `zCountsPerPitch`, `backlashSteps`. State: `active` (bidirectional), `latchedZ`, `latchedSpindle`, `referenceLatched`, `takeupPending`. Diagnostics latched at every resume: `lastIdealAdvance`, `lastActualAdvance`, `lastPhaseError`, `lastCorrection`.
+- **Ideal advance** — how many steps the leadscrew *would* have moved if pure sync had run continuously since the latch. Derived from accumulated spindle motion times the sync ratio.
+- **Actual advance** — how many steps the carriage *did* move since the latch, derived from the Z scale and the configured thread-pitch geometry.
+
+Their difference is a signed phase error in step-equivalents. Modulo the thread pitch and folded to the shortest signed magnitude, it yields a correction the firmware queues as an indexing move *before* sync resumes. That move physically shifts the carriage by a sub-thread-pitch amount in whichever direction lands it on an integer multiple of thread pitch above the stop position. From that adjusted starting position, the subsequent sync return necessarily covers an integer number of thread pitches — meaning the spindle rotates an integer number of revolutions — meaning the spindle phase at the next trigger matches the latched phase, regardless of how the carriage got there.
+
+A backlash takeup move, if configured, executes first (in the direction derived from cut direction and thread geometry); the phase correction runs once the takeup completes, so the takeup itself can't introduce additional phase error.
+
+#### Why it works across workflows
+
+The mechanism does not care whether the carriage was driven electronically or manipulated mechanically. It only sees the carriage's current Z and computes the sub-pitch residue between that Z and the latched Z. Workflow-specific perturbations — half-nut snaps to leadscrew-pitch grid, manual jogs, inconsistent retract distances — all manifest as different residues, all absorbed by the same modular correction. The cut always stops at the configured Z, and the cutter always enters the same thread groove, by construction.
+
+#### Limits
+
+The re-sync assumes the Z scale reading at resume reflects a carriage that is *mechanically coupled* to the leadscrew at that moment (i.e., the half-nut is engaged when the operator presses Cut). Pressing Cut with the half-nut open will produce a physically meaningless leadscrew offset — there is no sensor to warn against this. The thread geometry parameters (sync ratio, thread-pitch-in-steps, Z-counts-per-pitch) must be configured consistently with each other; the correction folds error within `pitch/2`, so a systematic mismatch larger than half a pitch will alias and the cutter will drift to a different groove. Crucially, the firmware's `threadPitchSteps / zCountsPerPitch` ratio (leadscrew steps per Z-encoder count, the firmware's *model* of the carriage drivetrain) must equal the physical drivetrain's actual leadscrew-steps-per-Z-count ratio, or the algorithm's geometry is decoupled from reality and phase will drift in proportion to cut distance.
+
+#### Modbus interface
+
+Configuration (SW write): `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `threadPitchSteps`, `zCountsPerPitch`, `backlashSteps`, `hysteresis`.
+
+State (firmware-owned, except `active` which is bidirectional): `active`, `latchedZ`, `latchedSpindle`, `referenceLatched`, `takeupPending`.
+
+Per-resume diagnostics: `lastIdealAdvance`, `lastActualAdvance`, `lastPhaseError`, `lastCorrection`.
+
+Field-level semantics (units, sign conventions, who writes what) are documented inline at the `elsStop_t` struct definition in `Core/Inc/Ramps.h`. The algorithm itself is in `applyPhaseCorrection()` and the trigger block in `SynchroRefreshTimerIsr()` in `Core/Src/Ramps.c`.
 
 ---
 
