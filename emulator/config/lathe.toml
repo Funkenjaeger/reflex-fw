@@ -14,7 +14,7 @@ initial_rpm = 0.0
 
 [leadscrew]
 tpi = 8                        # Threads per inch of the physical leadscrew
-mm_per_step = 0.0025           # Leadscrew travel per stepper step
+mm_per_step = 0.00396875       # Leadscrew travel per stepper step (3.175 mm/rev ÷ 800 microsteps/rev to match firmware's 252 steps/mm geometry)
 
 [z_axis]
 encoder_counts_per_mm = 400    # Z-axis DRO resolution
