@@ -79,6 +79,12 @@ Dashboard::Dashboard(const EmuConfig &cfg, LathePhysics &physics, Transport &tra
                      rampsSharedData_t &shared)
     : cfg(cfg), physics(physics), transport(transport), shared(shared),
       running(false), manual_move(false), manual_move_timer(0.0), manual_move_used(false),
+      prev_els_seq(0), prev_els_enable(0),
+      last_stop_spindle(0), last_stop_spindle_valid(false),
+      prev_stop_spindle(0), prev_stop_spindle_valid(false),
+      els_stop_pass_count(0),
+      prev_thread_pitch_steps(0.0f), prev_z_counts_per_pitch(0.0f),
+      geom_first_check_done(false),
       spark_rpm(cfg.sparkline_seconds, cfg.refresh_hz, 30),
       spark_zpos(cfg.sparkline_seconds, cfg.refresh_hz, 30),
       spark_zerr(cfg.sparkline_seconds, cfg.refresh_hz, 30)
@@ -116,11 +122,134 @@ void Dashboard::run() {
     int interval_us = 1000000 / cfg.refresh_hz;
 
     while (running.load()) {
+        /* Geometry consistency check: physics says z-counts per leadscrew
+         * step is `mm_per_step × encoder_counts_per_mm`. Firmware says it is
+         * `zCountsPerPitch / threadPitchSteps`. The phase correction
+         * algorithm decouples from physical reality if these disagree —
+         * that bug ate a debugging session, hence the runtime guard.
+         * Fires once on first valid geometry, and again on any change. */
+        float tps  = shared.elsStop.threadPitchSteps;
+        float zcpp = shared.elsStop.zCountsPerPitch;
+        if (tps != 0.0f && zcpp != 0.0f
+            && (!geom_first_check_done
+                || tps != prev_thread_pitch_steps
+                || zcpp != prev_z_counts_per_pitch)) {
+            double physics_ratio  = cfg.leadscrew_mm_per_step * cfg.z_encoder_counts_per_mm;
+            double firmware_ratio = (double)zcpp / (double)tps;
+            double denom = std::abs(firmware_ratio) > 1e-9 ? std::abs(firmware_ratio) : 1e-9;
+            double rel_err = std::abs(physics_ratio - firmware_ratio) / denom;
+            if (rel_err > 0.005) {
+                double suggested_mm_per_step = firmware_ratio / cfg.z_encoder_counts_per_mm;
+                emu_log_event("WARN geom mismatch: physics=%.4f firmware=%.4f zCnt/lsStep (%.1f%% off) — set mm_per_step=%.6f",
+                              physics_ratio, firmware_ratio, rel_err * 100.0,
+                              suggested_mm_per_step);
+            } else {
+                emu_log_event("OK geom consistent: physics=%.4f firmware=%.4f zCnt/lsStep",
+                              physics_ratio, firmware_ratio);
+            }
+            prev_thread_pitch_steps = tps;
+            prev_z_counts_per_pitch = zcpp;
+            geom_first_check_done = true;
+        }
+
         /* Update sparklines */
         spark_rpm.push(std::abs(physics.getSpindleRPM()));
         spark_zpos.push(physics.getCarriageMM());
         double err = (double)(int32_t)(shared.servo.desiredSteps - shared.servo.currentSteps);
         spark_zerr.push(std::abs(err));
+
+        /* Per-pass spindle phase capture. Enable polling resets the pass
+         * counter at the start of a new threading job. The actual trigger
+         * latch is observed via emu_hw.els_last_stop_seq — incremented by
+         * Ramps.c the instant the stop fires, so the captured spindle/Z
+         * counts are atomic with the firmware's `active` transition (no
+         * dashboard sampling lag). */
+        uint16_t cur_enable = shared.elsStop.enable;
+        if (cur_enable && !prev_els_enable) {
+            last_stop_spindle_valid = false;
+            prev_stop_spindle_valid = false;
+            els_stop_pass_count = 0;
+        }
+        prev_els_enable = cur_enable;
+
+        uint32_t cur_seq = emu_hw.els_last_stop_seq;
+        if (cur_seq != prev_els_seq) {
+            /* Pull both fields before doing anything else — they're written
+             * back-to-back by Ramps.c just before incrementing the seq, so
+             * by the time we observe the new seq they're stable. */
+            last_stop_spindle = emu_hw.els_last_stop_spindle;
+            int32_t z_pos     = emu_hw.els_last_stop_z;
+            last_stop_spindle_valid = true;
+            els_stop_pass_count++;
+
+            /* dPhase = shortest signed phase shift vs. previous stop in
+             * [-cpr/2, +cpr/2]; ideal sync → dPhase ≈ 0 every pass.
+             * Zovershoot = Z position at trigger − configured stopPosition. */
+            int cpr = cfg.spindle_counts_per_rev;
+            int32_t z_ovs = z_pos - shared.elsStop.stopPosition;
+
+            /* Firmware-computed correction values from the *previous*
+             * resume (the one that set up this pass's start position). On
+             * pass #1 these are zeros since no correction has run yet. */
+            float f_ideal = shared.elsStop.lastIdealAdvance;
+            float f_actual = shared.elsStop.lastActualAdvance;
+            float f_err   = shared.elsStop.lastPhaseError;
+            float f_corr  = shared.elsStop.lastCorrection;
+
+            if (cpr > 0) {
+                int32_t phase = last_stop_spindle % cpr;
+                if (phase < 0) phase += cpr;
+                /* Dashboard line: phase-only (cross-pass repeatability at a
+                 * glance). Full diagnostics + config dump go to the trace
+                 * file via emu_log_trace so the dashboard ring isn't
+                 * crowded with high-frequency detail. */
+                if (prev_stop_spindle_valid) {
+                    int32_t d_spindle = last_stop_spindle - prev_stop_spindle;
+                    int32_t d_phase = d_spindle % cpr;
+                    if (d_phase >  cpr / 2) d_phase -= cpr;
+                    if (d_phase < -cpr / 2) d_phase += cpr;
+                    emu_log_event("ELS stop #%d phase=%d/%d dPhase=%+d",
+                                  els_stop_pass_count, (int)phase, cpr, (int)d_phase);
+                    emu_log_trace("ELS stop #%d detail: dSpindle=%d ideal=%.1f actual=%.1f err=%.1f corr=%.1f",
+                                  els_stop_pass_count, (int)d_spindle,
+                                  (double)f_ideal, (double)f_actual,
+                                  (double)f_err, (double)f_corr);
+                } else {
+                    emu_log_event("ELS stop #%d phase=%d/%d (first)",
+                                  els_stop_pass_count, (int)phase, cpr);
+                    emu_log_trace("ELS stop #%d detail: spindle=%d (first) ideal=%.1f actual=%.1f err=%.1f corr=%.1f",
+                                  els_stop_pass_count, (int)last_stop_spindle,
+                                  (double)f_ideal, (double)f_actual,
+                                  (double)f_err, (double)f_corr);
+                }
+                /* Config dump on every trigger so geometry is captured once
+                 * it stabilizes — pass #1 often fires before Python has
+                 * pushed thread geometry (an auto-engage from initial state),
+                 * so a single dump on the first trigger isn't enough. */
+                int32_t sr_num = shared.scales[0].syncRatioNum;
+                int32_t sr_den = shared.scales[0].syncRatioDen;
+                emu_log_trace("ELS stop #%d cfg: stopPos=%d stopDir=%d scaleIdx=%d latchedZ=%d latchedSpindle=%d",
+                              els_stop_pass_count,
+                              (int)shared.elsStop.stopPosition,
+                              (int)shared.elsStop.stopDirection,
+                              (int)shared.elsStop.scaleIndex,
+                              (int)shared.elsStop.latchedZ,
+                              (int)shared.elsStop.latchedSpindle);
+                emu_log_trace("ELS stop #%d geom: syncN=%d syncD=%d tps=%.3f zCpP=%.3f backlash=%u",
+                              els_stop_pass_count,
+                              (int)sr_num, (int)sr_den,
+                              (double)shared.elsStop.threadPitchSteps,
+                              (double)shared.elsStop.zCountsPerPitch,
+                              (unsigned)shared.elsStop.backlashSteps);
+            } else {
+                emu_log_event("ELS stop #%d spindle=%d Zovs=%d (no cpr)",
+                              els_stop_pass_count, (int)last_stop_spindle, (int)z_ovs);
+            }
+
+            prev_stop_spindle = last_stop_spindle;
+            prev_stop_spindle_valid = true;
+        }
+        prev_els_seq = cur_seq;
 
         draw();
         handleInput();
@@ -143,7 +272,7 @@ void Dashboard::draw() {
     int term_w = ws.ws_col > 0 ? ws.ws_col : 100;
     int term_h = ws.ws_row > 0 ? ws.ws_row : 30;
 
-    int left_w = 40;
+    int left_w = 50;
     int right_w = term_w - left_w - 3;
     if (right_w < 20) right_w = 20;
 
@@ -259,6 +388,15 @@ void Dashboard::drawStatePane(int startRow, int startCol, int width) {
         } else {
             LINE(" reference: %s", DIM "not latched" RESET_ATTR);
         }
+        /* Per-pass spindle phase at last stop. Captured by dashboard, not
+         * firmware — proves pass-to-pass sync without touching Modbus map. */
+        if (last_stop_spindle_valid && cfg.spindle_counts_per_rev > 0) {
+            int32_t phase = last_stop_spindle % cfg.spindle_counts_per_rev;
+            if (phase < 0) phase += cfg.spindle_counts_per_rev;
+            LINE(" lastStopPhase: %d/%d", (int)phase, cfg.spindle_counts_per_rev);
+        } else {
+            LINE(" lastStopPhase: %s", DIM "—" RESET_ATTR);
+        }
         LINE(" lastIdeal:%.2f  lastActual:%.2f",
              (double)es.lastIdealAdvance, (double)es.lastActualAdvance);
         LINE(" lastPhaseErr:%.2f  lastCorr:%.2f",
@@ -335,7 +473,7 @@ void Dashboard::drawStatusBar(int row, int width) {
         zx_keys = z_allowed ? "  [Z]pos [X]pos  arrows" : "  [X]pos  arrows";
     }
 
-    printf("%s" DIM "[S]pindle RPM  [D]ir  [H]alf-nut  [M]anual%s  [E]-stop  %s  [Q]uit" RESET_ATTR,
+    printf("%s" DIM "[S]pindle RPM  [D]ir  [H]alf-nut  [M]anual%s  [L]og  [E]-stop  %s  [Q]uit" RESET_ATTR,
            move_indicator, zx_keys, start_stop);
 }
 
@@ -428,6 +566,10 @@ void Dashboard::handleInput() {
                     return;
                 }
                 break;
+
+            case 'l': case 'L':
+                promptLogMessage();
+                return;
 
             default:
                 break;
@@ -540,6 +682,39 @@ void Dashboard::promptXPosition() {
         emu_log_event("X move to %.3f %s", pos, unitSuffix());
         manual_move_timer = 0.0;
         manual_move_used = true;
+    }
+
+    new_tio.c_lflag &= ~(ICANON | ECHO);
+    new_tio.c_cc[VMIN] = 0;
+    new_tio.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+    printf(HIDE_CURSOR);
+    printf(CLEAR_SCREEN);
+    draw();
+}
+
+void Dashboard::promptLogMessage() {
+    printf(SHOW_CURSOR);
+    struct winsize ws;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+    int row = ws.ws_row > 0 ? ws.ws_row : 30;
+    moveTo(row, 1);
+    clearToEol();
+    printf("Log message: ");
+    fflush(stdout);
+
+    struct termios old_tio, new_tio;
+    tcgetattr(STDIN_FILENO, &old_tio);
+    new_tio = old_tio;
+    new_tio.c_lflag |= ICANON | ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+
+    char buf[120];
+    if (fgets(buf, sizeof(buf), stdin) && buf[0] != '\n') {
+        /* Strip trailing newline left by fgets. */
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+        emu_log_event("[note] %s", buf);
     }
 
     new_tio.c_lflag &= ~(ICANON | ECHO);

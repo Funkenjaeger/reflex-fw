@@ -68,13 +68,28 @@ typedef struct {
     volatile int event_log_head;
     volatile int event_log_count;
 
+    /* ELS-stop per-pass instrumentation, written atomically by Ramps.c the
+     * instant the stop condition triggers. Lives outside rampsSharedData_t
+     * so it is NOT part of the Modbus map — emulator-only debug aid for
+     * verifying pass-to-pass spindle phase repeatability. */
+    volatile int32_t  els_last_stop_spindle;   /* scales[0].position at trigger */
+    volatile int32_t  els_last_stop_z;         /* scales[scaleIndex].position at trigger */
+    volatile uint32_t els_last_stop_seq;       /* increments on every trigger; dashboard edge-detects this */
+
 } EmulatorHardwareState;
 
 /* Global instance */
 extern EmulatorHardwareState emu_hw;
 
-/* Add an event to the log (thread-safe) */
+/* Add an event to the log (thread-safe). Writes to both the dashboard
+ * ring buffer and the persistent file. */
 void emu_log_event(const char *fmt, ...);
+
+/* Append a trace line to the persistent log file only. Use for high-volume
+ * diagnostic output (e.g. per-tick ISR samples) that would otherwise crowd
+ * the dashboard's 256-entry ring. Thread-safe; no-op if file logging is
+ * disabled. */
+void emu_log_trace(const char *fmt, ...);
 
 #ifdef __cplusplus
 }

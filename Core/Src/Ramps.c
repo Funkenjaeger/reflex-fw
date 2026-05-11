@@ -19,6 +19,31 @@
 #include "Ramps.h"
 #include "Scales.h"
 
+#ifdef EMULATOR_BUILD
+#include "emulator_state.h"
+
+/* Step_6 instrumentation: trace leadscrew step accounting from
+ * applyPhaseCorrection completion to the next ELS stop trigger. Kept as a
+ * permanent emulator-only debug aid for ELS phase regressions — the
+ * per-pass `step6 #N start / t=... / end` log lines expose dCur, dDes,
+ * dSpindle, dZ, direction-flutter counts, and per-direction step pulses,
+ * which together fully describe the firmware's step accounting during the
+ * window where phase is determined. See DEBUGGING.md for the original
+ * investigation that motivated this instrumentation. */
+static uint32_t emu_step6_active = 0;
+static uint32_t emu_step6_pass = 0;
+static uint32_t emu_step6_tick = 0;
+static const uint32_t emu_step6_log_interval = 2000;  /* mid-cut sample period in ISR ticks */
+static int32_t  emu_step6_start_current = 0;
+static int32_t  emu_step6_start_desired = 0;
+static int32_t  emu_step6_start_spindle = 0;
+static int32_t  emu_step6_start_z = 0;
+static uint32_t emu_step6_pos_pulses = 0;
+static uint32_t emu_step6_neg_pulses = 0;
+static uint32_t emu_step6_dir_flips = 0;
+static int32_t  emu_step6_prev_change_sign = 0;
+#endif
+
 
 // This variable is the handler for the modbus communication
 modbusHandler_t RampsModbusData;
@@ -232,6 +257,21 @@ static inline void updateJogPosition(rampsHandler_t *data) {
   shared->servo.desiredSteps += positionIncrement;
 }
 
+/* ELS phase correction: jog the carriage to an integer multiple of thread
+ * pitch above stopPosition, so the next sync return covers a whole number
+ * of thread pitches and the trigger fires at the latched spindle phase.
+ *
+ * Two leadscrew-step quantities are compared:
+ *   idealAdvance  = what pure sync would have done since latch
+ *                   (spindle motion via syncRatio)
+ *   actualAdvance = what the carriage actually did since latch
+ *                   (Z motion via thread-pitch geometry)
+ * Their difference, modulo pitch and folded to ±pitch/2, is the shortest
+ * pre-cut jog that brings Z to thread-pitch alignment. Workflow-agnostic:
+ * the carriage may have gotten to its current Z by any combination of
+ * electronic retract, manual jog, half-nut snap, etc.
+ *
+ * See ARCHITECTURE.md → ELS Shoulder Stop for the conceptual model. */
 static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
   int32_t deltaSpindle =
     shared->scales[0].position - shared->elsStop.latchedSpindle;
@@ -258,6 +298,31 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
   shared->elsStop.lastActualAdvance = actualAdvance;
   shared->elsStop.lastPhaseError    = phaseError;
   shared->elsStop.lastCorrection    = correction;
+
+#ifdef EMULATOR_BUILD
+  /* Arm step_6 trace: snapshot starting state so per-tick logs can report
+   * deltas. emu_step6_pass identifies the pass we just left (the trigger seq
+   * already incremented when this pass started). */
+  emu_step6_pass             = emu_hw.els_last_stop_seq;
+  emu_step6_tick             = 0;
+  emu_step6_start_current    = (int32_t)shared->servo.currentSteps;
+  emu_step6_start_desired    = (int32_t)shared->servo.desiredSteps;
+  emu_step6_start_spindle    = shared->scales[0].position;
+  emu_step6_start_z          = shared->scales[shared->elsStop.scaleIndex].position;
+  emu_step6_pos_pulses       = 0;
+  emu_step6_neg_pulses       = 0;
+  emu_step6_dir_flips        = 0;
+  emu_step6_prev_change_sign = 0;
+  emu_step6_active           = 1;
+  emu_log_trace("step6 #%u start cur=%d des=%d sp=%d z=%d stg=%d corr=%.1f",
+                (unsigned)emu_step6_pass,
+                (int)shared->servo.currentSteps,
+                (int)shared->servo.desiredSteps,
+                (int)shared->scales[0].position,
+                (int)shared->scales[shared->elsStop.scaleIndex].position,
+                (int)shared->servo.stepsToGo,
+                (double)correction);
+#endif
 }
 
 void SynchroRefreshTimerIsr(rampsHandler_t *data) {
@@ -316,6 +381,33 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
             shared->elsStop.latchedSpindle   = shared->scales[0].position;
             shared->elsStop.referenceLatched = 1;
           }
+#ifdef EMULATOR_BUILD
+          /* Atomic per-pass latch for the emulator dashboard. Lives outside
+           * the Modbus map (rampsSharedData_t) so the SW protocol is
+           * unaffected. Sequence counter increments so the dashboard can
+           * edge-detect new triggers without polling `active` itself. */
+          emu_hw.els_last_stop_spindle = shared->scales[0].position;
+          emu_hw.els_last_stop_z       = shared->scales[shared->elsStop.scaleIndex].position;
+          emu_hw.els_last_stop_seq++;
+
+          /* Close out the step_6 trace if armed. Reports cumulative deltas
+           * + direction-flutter counters so the analysis can compare the
+           * predicted step_6 motion against what actually happened. */
+          if (emu_step6_active) {
+            int32_t d_cur   = (int32_t)shared->servo.currentSteps - emu_step6_start_current;
+            int32_t d_des   = (int32_t)shared->servo.desiredSteps - emu_step6_start_desired;
+            int32_t d_sp    = shared->scales[0].position - emu_step6_start_spindle;
+            int32_t d_z     = shared->scales[shared->elsStop.scaleIndex].position - emu_step6_start_z;
+            int32_t syncErr = data->scalesSyncDeltaPos[shared->elsStop.scaleIndex].error;
+            emu_log_trace("step6 #%u end t=%u dCur=%+d dDes=%+d syncE=%d dSp=%+d dZ=%+d flips=%u P+=%u P-=%u",
+                          (unsigned)emu_step6_pass, (unsigned)emu_step6_tick,
+                          (int)d_cur, (int)d_des, (int)syncErr,
+                          (int)d_sp, (int)d_z,
+                          (unsigned)emu_step6_dir_flips,
+                          (unsigned)emu_step6_pos_pulses, (unsigned)emu_step6_neg_pulses);
+            emu_step6_active = 0;
+          }
+#endif
         }
       }
 
@@ -372,12 +464,49 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
       HAL_GPIO_WritePin(STEP_GPIO_PORT, STEP_PIN, GPIO_PIN_SET);
       HAL_GPIO_WritePin(STEP_GPIO_PORT, SPARE_2_PIN, GPIO_PIN_SET);
       shared->servo.currentSteps += direction;
+#ifdef EMULATOR_BUILD
+      if (emu_step6_active) {
+        if (direction == 1) emu_step6_pos_pulses++;
+        else                emu_step6_neg_pulses++;
+      }
+#endif
     }
 
     data->servoPreviousDirection = direction;
   }
 
   servoCyclesCounter = (servoCyclesCounter + 1) % servoCycles;
+
+#ifdef EMULATOR_BUILD
+  /* Step_6 per-tick trace: flutter detection + periodic sample. End-of-tick
+   * so post-emission state is captured. Direction flutter = sign flips of
+   * (desiredSteps − currentSteps); high flip counts would support the
+   * indexing↔sync interaction hypothesis (DEBUGGING.md #1). */
+  if (emu_step6_active) {
+    int32_t change_now = (int32_t)shared->servo.desiredSteps - (int32_t)shared->servo.currentSteps;
+    int32_t cs = (change_now > 0) ? 1 : (change_now < 0 ? -1 : 0);
+    if (cs != 0 && emu_step6_prev_change_sign != 0 && cs != emu_step6_prev_change_sign) {
+      emu_step6_dir_flips++;
+    }
+    if (cs != 0) emu_step6_prev_change_sign = cs;
+
+    emu_step6_tick++;
+    if ((emu_step6_tick % emu_step6_log_interval) == 0) {
+      int32_t d_cur   = (int32_t)shared->servo.currentSteps - emu_step6_start_current;
+      int32_t d_des   = (int32_t)shared->servo.desiredSteps - emu_step6_start_desired;
+      int32_t d_sp    = shared->scales[0].position - emu_step6_start_spindle;
+      int32_t d_z     = shared->scales[shared->elsStop.scaleIndex].position - emu_step6_start_z;
+      int32_t syncErr = data->scalesSyncDeltaPos[shared->elsStop.scaleIndex].error;
+      emu_log_trace("step6 #%u t=%u dCur=%+d dDes=%+d syncE=%d dSp=%+d dZ=%+d flips=%u P+=%u P-=%u stg=%d",
+                    (unsigned)emu_step6_pass, (unsigned)emu_step6_tick,
+                    (int)d_cur, (int)d_des, (int)syncErr,
+                    (int)d_sp, (int)d_z,
+                    (unsigned)emu_step6_dir_flips,
+                    (unsigned)emu_step6_pos_pulses, (unsigned)emu_step6_neg_pulses,
+                    (int)shared->servo.stepsToGo);
+    }
+  }
+#endif
 
   shared->executionCycles = DWT->CYCCNT - start;
   HAL_GPIO_WritePin(SPARE_2_GPIO_PORT, SPARE_1_PIN, GPIO_PIN_RESET);

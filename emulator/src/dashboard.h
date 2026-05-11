@@ -38,6 +38,27 @@ private:
     double manual_move_timer;  /* seconds since last arrow input */
     bool manual_move_used;     /* true once user has made at least one move */
 
+    /* Emulator-only per-pass spindle phase tracking. The firmware writes
+     * emu_hw.els_last_stop_{spindle,z,seq} atomically at the trigger tick;
+     * the dashboard edge-detects the sequence counter. Enable polling is
+     * sampled — operator-driven, slow enough that 10 Hz suffices. */
+    uint32_t prev_els_seq;
+    uint16_t prev_els_enable;
+    int32_t  last_stop_spindle;
+    bool     last_stop_spindle_valid;
+    int32_t  prev_stop_spindle;        /* spindle count from previous stop, for delta computation */
+    bool     prev_stop_spindle_valid;
+    int32_t  els_stop_pass_count;      /* stops since last enable rising edge */
+
+    /* Geometry consistency check: catches misconfiguration where the
+     * physics (`mm_per_step × encoder_counts_per_mm`) and the firmware's
+     * model (`zCountsPerPitch / threadPitchSteps`) disagree on z-counts
+     * per leadscrew step. Logs once on the first valid geometry and again
+     * whenever the values change. See DEBUGGING.md post-mortem. */
+    float    prev_thread_pitch_steps;
+    float    prev_z_counts_per_pitch;
+    bool     geom_first_check_done;
+
     /* Sparkline history ring buffers */
     struct SparklineBuffer {
         std::deque<double> samples;
@@ -76,6 +97,7 @@ private:
     void promptSpindleRPM();
     void promptZPosition();
     void promptXPosition();
+    void promptLogMessage();
 };
 
 #endif /* EMU_DASHBOARD_H */

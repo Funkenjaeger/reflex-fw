@@ -276,7 +276,33 @@ HAL_StatusTypeDef HAL_RCC_ClockConfig(RCC_ClkInitTypeDef *RCC_ClkInitStruct, uin
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <time.h>
+
+/* Persistent file log: appended to on every emu_log_event so events outlive
+ * the 256-entry in-memory ring. Path can be overridden with EMU_LOG_FILE;
+ * default is "emulator.log" in the cwd. Set EMU_LOG_FILE= (empty) to disable. */
+static FILE *emu_log_fp = NULL;
+static int   emu_log_fp_tried = 0;
+
+static void emu_log_file_open(void) {
+    if (emu_log_fp_tried) return;
+    emu_log_fp_tried = 1;
+    const char *path = getenv("EMU_LOG_FILE");
+    if (path == NULL) path = "emulator.log";
+    if (path[0] == '\0') return;  /* disabled */
+    emu_log_fp = fopen(path, "a");
+    if (emu_log_fp == NULL) return;
+    /* Session-start marker so multiple runs in the same file are delineated. */
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    fprintf(emu_log_fp,
+            "==== emulator session start %04d-%02d-%02d %02d:%02d:%02d ====\n",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+            tm.tm_hour, tm.tm_min, tm.tm_sec);
+    fflush(emu_log_fp);
+}
 
 void emu_log_event(const char *fmt, ...) {
     struct timespec ts;
@@ -295,4 +321,33 @@ void emu_log_event(const char *fmt, ...) {
 
     emu_hw.event_log_head++;
     if (emu_hw.event_log_count < 256) emu_hw.event_log_count++;
+
+    /* Tee to file. Opened lazily on first event; date is included on session
+     * start, so per-event lines only need the time-of-day already formatted
+     * into the ring entry. */
+    emu_log_file_open();
+    if (emu_log_fp != NULL) {
+        fprintf(emu_log_fp, "%s\n", emu_hw.event_log[idx]);
+        fflush(emu_log_fp);
+    }
+}
+
+void emu_log_trace(const char *fmt, ...) {
+    emu_log_file_open();
+    if (emu_log_fp == NULL) return;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(emu_log_fp, "%02d:%02d:%02d.%03ld ",
+            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(emu_log_fp, fmt, ap);
+    va_end(ap);
+
+    fputc('\n', emu_log_fp);
+    fflush(emu_log_fp);
 }
