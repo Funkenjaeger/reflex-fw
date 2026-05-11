@@ -117,12 +117,13 @@ int main(int argc, char *argv[]) {
     static rampsHandler_t rampsData;
     memset(&rampsData, 0, sizeof(rampsData));
 
-    /* Wire timer handles to scales (same mapping as firmware's main.c) */
+    /* Wire timer handles to scales (same mapping as firmware's main.c). */
     extern TIM_HandleTypeDef htim1, htim2, htim3, htim4;
-    rampsData.shared.scales[0].timerHandle = &htim1;
-    rampsData.shared.scales[1].timerHandle = &htim2;
-    rampsData.shared.scales[2].timerHandle = &htim3;
-    rampsData.shared.scales[3].timerHandle = &htim4;
+    TIM_HandleTypeDef *htims[SCALES_COUNT] = { &htim1, &htim2, &htim3, &htim4 };
+    for (int i = 0; i < SCALES_COUNT; i++) {
+        rampsData.shared.scales[i].timerHandleSlot = (uint32_t)i;
+        ramps_timer_handles[i] = htims[i];
+    }
 
     /* Set synchro timer and UART handles */
     rampsData.synchroRefreshTimer = &htim9;

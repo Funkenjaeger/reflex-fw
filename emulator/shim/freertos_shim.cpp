@@ -232,10 +232,18 @@ struct SoftwareTimer {
                 if (expired) {
                     /* Timer fired */
                     if (!autoReload) running.store(false);
-                    /* The Modbus library casts TimerHandle_t as TimerHandle_t* in callback signature */
-                    TimerHandle_t self = (TimerHandle_t)this;
+                    /* The Modbus library declares its callback as
+                     * `void cb(TimerHandle_t *pxTimer)` and casts it through
+                     * the shim's TimerCallbackFunction_t typedef. It then
+                     * compares pxTimer to the registered handle to identify
+                     * the timer. On real FreeRTOS this works because the
+                     * caller passes the TimerHandle_t value directly and the
+                     * callee reinterprets it as a pointer-typed value with
+                     * the same bits. Mirror that here by passing `this` cast
+                     * to TimerHandle_t* — passing `&local_var` would be a
+                     * stack address that never matches the handle. */
                     lock.unlock();
-                    callback(&self);
+                    callback((TimerHandle_t *)this);
                 }
             }
         }

@@ -58,12 +58,14 @@ typedef struct {
 } deltaPosError_t;
 
 typedef struct {
-  TIM_HandleTypeDef *timerHandle;      // init-only: set before RampsStart(); must not be written via Modbus
+  uint32_t timerHandleSlot;            // init-only: index into ramps_timer_handles[]; held as a 4-byte slot id (not a pointer) so the modbus wire layout is identical on STM32 and 64-bit emulator hosts
   int32_t position;                    // READ-ONLY (firmware-owned): absolute encoder position, updated by ISR
   int32_t speed;                       // READ-ONLY (firmware-owned): encoder speed (counts/s), updated by updateSpeedTask
   int32_t syncRatioNum, syncRatioDen;  // SW write: sync ratio numerator/denominator (output steps per input count)
   uint16_t syncEnable;                 // SW write: 0 = sync disabled, non-zero = sync enabled for this scale
 } input_t;
+
+extern TIM_HandleTypeDef *ramps_timer_handles[SCALES_COUNT];
 
 typedef struct {
   float maxSpeed;              // SW write: maximum step rate (steps/s); clamped to 100000 by firmware

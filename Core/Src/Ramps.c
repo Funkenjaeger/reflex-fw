@@ -26,6 +26,11 @@ modbusHandler_t RampsModbusData;
 uint16_t servoCycles = 0;
 uint16_t servoCyclesCounter = 0;
 
+/* Side-table of real TIM handles, indexed by input_t.timerHandleSlot.
+ * The modbus-exposed input_t carries only a uint32_t slot id so the wire
+ * layout is identical on STM32 (4-byte pointer) and 64-bit emulator hosts. */
+TIM_HandleTypeDef *ramps_timer_handles[SCALES_COUNT] = {0};
+
 
 //osThreadId_t userLedTaskHandler;
 const osThreadAttr_t ledTaskAttributes = {
@@ -95,8 +100,8 @@ void RampsStart(rampsHandler_t *rampsData) {
 
   // Initialize and start encoder timer, reset the sync flags
   for (int j = 0; j < SCALES_COUNT; ++j) {
-    initScaleTimer(rampsData->shared.scales[j].timerHandle);
-    HAL_TIM_Encoder_Start(rampsData->shared.scales[j].timerHandle, TIM_CHANNEL_ALL);
+    initScaleTimer(ramps_timer_handles[rampsData->shared.scales[j].timerHandleSlot]);
+    HAL_TIM_Encoder_Start(ramps_timer_handles[rampsData->shared.scales[j].timerHandleSlot], TIM_CHANNEL_ALL);
   }
 
   // Enable debug cycle counter
@@ -284,7 +289,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
   for (int i = 0; i < SCALES_COUNT; i++) {
     data->scalesDeltaPos[i].oldPosition = data->scalesDeltaPos[i].position;
-    data->scalesDeltaPos[i].position = __HAL_TIM_GET_COUNTER(data->shared.scales[i].timerHandle);
+    data->scalesDeltaPos[i].position = __HAL_TIM_GET_COUNTER(ramps_timer_handles[data->shared.scales[i].timerHandleSlot]);
     data->scalesDeltaPos[i].delta = (int16_t) (data->scalesDeltaPos[i].position - data->scalesDeltaPos[i].oldPosition);
     shared->scales[i].position += data->scalesDeltaPos[i].delta;
 
