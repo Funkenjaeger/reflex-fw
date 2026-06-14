@@ -100,10 +100,12 @@ void configureOutputPin(GPIO_TypeDef *Port, uint16_t Pin) {
 void RampsStart(rampsHandler_t *rampsData) {
   rampsData->shared.servo.maxSpeed = 720;
   rampsData->shared.servo.acceleration = 120;
+  rampsData->shared.servo.servoDir = 1;
 
   for (int i = 0; i < SCALES_COUNT; i++) {
     rampsData->shared.scales[i].syncRatioNum = 1;
     rampsData->shared.scales[i].syncRatioDen = 100;
+    rampsData->shared.scales[i].scaleDir = 1;
   }
 
   rampsData->shared.elsStop.referenceLatched = 0;
@@ -356,7 +358,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
     data->scalesDeltaPos[i].oldPosition = data->scalesDeltaPos[i].position;
     data->scalesDeltaPos[i].position = __HAL_TIM_GET_COUNTER(ramps_timer_handles[data->shared.scales[i].timerHandleSlot]);
     data->scalesDeltaPos[i].delta = (int16_t) (data->scalesDeltaPos[i].position - data->scalesDeltaPos[i].oldPosition);
-    shared->scales[i].position += data->scalesDeltaPos[i].delta;
+    shared->scales[i].position += data->scalesDeltaPos[i].delta * shared->scales[i].scaleDir;
 
     // calculate delta for sync ratio configured for the current scale
     deltaPositionAndError(
@@ -453,10 +455,10 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
     if (change > 0) {
       direction = 1;
-      HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_PIN, shared->servo.servoDir == 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
     }
     if (change < 0) {
-      HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_PIN, shared->servo.servoDir == 1 ? GPIO_PIN_RESET : GPIO_PIN_SET);
       direction = -1;
     }
 

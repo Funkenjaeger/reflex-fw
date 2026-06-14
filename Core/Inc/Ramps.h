@@ -63,6 +63,7 @@ typedef struct {
   int32_t speed;                       // READ-ONLY (firmware-owned): encoder speed (counts/s), updated by updateSpeedTask
   int32_t syncRatioNum, syncRatioDen;  // SW write: sync ratio numerator/denominator (output steps per input count)
   uint16_t syncEnable;                 // SW write: 0 = sync disabled, non-zero = sync enabled for this scale
+  int16_t scaleDir;                    // SW write: ±1, default +1 (no inversion); applied to encoder delta in ISR
 } input_t;
 
 extern TIM_HandleTypeDef *ramps_timer_handles[SCALES_COUNT];
@@ -76,6 +77,7 @@ typedef struct {
   uint32_t destinationSteps;  // SW write: absolute destination step count for indexing mode
   uint32_t currentSteps;      // READ-ONLY (firmware-owned): step counter incremented/decremented by ISR
   uint32_t desiredSteps;      // READ-ONLY (firmware-owned): accumulated target steps, driven by sync/ramp
+  int16_t servoDir;           // SW write: ±1, default +1 (no inversion); applied to DIR pin in ISR
 } servo_t;
 
 typedef struct {

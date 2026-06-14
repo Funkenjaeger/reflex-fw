@@ -11,6 +11,7 @@ inertia_kg_m2 = 0.05           # Rotational inertia (kg*m^2)
 max_torque_nm = 2.0            # Max motor torque for accel/decel
 friction_nm = 0.1              # Constant friction torque
 initial_rpm = 0.0
+scale_dir = 1                  # +1 or -1: encoder direction for spindle scale
 
 [leadscrew]
 tpi = 8                        # Threads per inch of the physical leadscrew
@@ -23,6 +24,7 @@ max_position_mm = 300.0
 min_position_mm = -5.0
 initial_position_mm = 0.0
 half_nut_engaged = false       # Initial half-nut state
+scale_dir = 1                  # +1 or -1: encoder direction for Z scale
 
 [cross_slide]
 encoder_counts_per_mm = 400    # Cross-slide DRO resolution
@@ -38,6 +40,7 @@ manual_move_timeout_s = 2.0    # seconds of inactivity before auto-disabling man
 [servo]
 max_speed = 720                # steps/s (firmware default, overridable via Modbus)
 acceleration = 120             # steps/s^2
+dir = 1                        # +1 or -1: motor direction for servo output
 
 [modbus]
 address = 17

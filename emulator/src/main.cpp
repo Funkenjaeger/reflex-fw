@@ -148,6 +148,11 @@ int main(int argc, char *argv[]) {
     RampsStart(&rampsData);
     printf("Firmware initialized.\n");
 
+    /* Apply direction config after RampsStart defaults */
+    rampsData.shared.scales[0].scaleDir = (int16_t)cfg.spindle_scale_dir;
+    rampsData.shared.scales[1].scaleDir = (int16_t)cfg.z_scale_dir;
+    rampsData.shared.servo.servoDir = (int16_t)cfg.servo_dir;
+
     /* Initialize servoCycles to avoid division by zero on first ISR tick.
      * On real hardware updateSpeedTask() sets this within 50ms of boot,
      * but the emulator's ISR thread starts immediately.

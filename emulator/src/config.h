@@ -16,6 +16,7 @@ struct EmuConfig {
     double spindle_max_torque;
     double spindle_friction;
     double spindle_initial_rpm;
+    int    spindle_scale_dir;  /* +1 or -1: encoder direction for spindle scale */
 
     /* [leadscrew] */
     double leadscrew_tpi;
@@ -28,6 +29,7 @@ struct EmuConfig {
     double z_min_mm;
     double z_initial_mm;
     bool   z_half_nut_engaged;
+    int    z_scale_dir;        /* +1 or -1: encoder direction for Z scale */
 
     /* [cross_slide] */
     double x_encoder_counts_per_mm;
@@ -43,6 +45,7 @@ struct EmuConfig {
     /* [servo] */
     double servo_max_speed;
     double servo_acceleration;
+    int    servo_dir;          /* +1 or -1: motor direction for servo output */
 
     /* [modbus] */
     int    modbus_address;

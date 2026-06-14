@@ -20,6 +20,7 @@ EmuConfig::EmuConfig() {
     spindle_max_torque = 2.0;
     spindle_friction = 0.1;
     spindle_initial_rpm = 0.0;
+    spindle_scale_dir = 1;
 
     leadscrew_tpi = 8.0;
     leadscrew_mm_per_step = 0.0025;
@@ -30,6 +31,7 @@ EmuConfig::EmuConfig() {
     z_min_mm = -5.0;
     z_initial_mm = 0.0;
     z_half_nut_engaged = false;
+    z_scale_dir = 1;
 
     x_encoder_counts_per_mm = 400.0;
     x_max_mm = 100.0;
@@ -43,6 +45,7 @@ EmuConfig::EmuConfig() {
 
     servo_max_speed = 720;
     servo_acceleration = 120;
+    servo_dir = 1;
 
     modbus_address = 17;
     modbus_baud = 115200;
@@ -137,6 +140,7 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
     cfg.spindle_max_torque = getDouble("spindle.max_torque_nm", cfg.spindle_max_torque);
     cfg.spindle_friction = getDouble("spindle.friction_nm", cfg.spindle_friction);
     cfg.spindle_initial_rpm = getDouble("spindle.initial_rpm", cfg.spindle_initial_rpm);
+    cfg.spindle_scale_dir = getInt("spindle.scale_dir", cfg.spindle_scale_dir);
 
     cfg.leadscrew_tpi = getDouble("leadscrew.tpi", cfg.leadscrew_tpi);
     cfg.leadscrew_mm_per_step = getDouble("leadscrew.mm_per_step", cfg.leadscrew_mm_per_step);
@@ -147,6 +151,7 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
     cfg.z_min_mm = getDouble("z_axis.min_position_mm", cfg.z_min_mm);
     cfg.z_initial_mm = getDouble("z_axis.initial_position_mm", cfg.z_initial_mm);
     cfg.z_half_nut_engaged = getBool("z_axis.half_nut_engaged", cfg.z_half_nut_engaged);
+    cfg.z_scale_dir = getInt("z_axis.scale_dir", cfg.z_scale_dir);
 
     cfg.x_encoder_counts_per_mm = getDouble("cross_slide.encoder_counts_per_mm", cfg.x_encoder_counts_per_mm);
     cfg.x_max_mm = getDouble("cross_slide.max_position_mm", cfg.x_max_mm);
@@ -160,6 +165,7 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
 
     cfg.servo_max_speed = getDouble("servo.max_speed", cfg.servo_max_speed);
     cfg.servo_acceleration = getDouble("servo.acceleration", cfg.servo_acceleration);
+    cfg.servo_dir = getInt("servo.dir", cfg.servo_dir);
 
     cfg.modbus_address = getInt("modbus.address", cfg.modbus_address);
     cfg.modbus_baud = getInt("modbus.baud", cfg.modbus_baud);

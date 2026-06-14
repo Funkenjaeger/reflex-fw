@@ -337,7 +337,7 @@ void Dashboard::drawStatePane(int startRow, int startCol, int width) {
 
     const char *dir_str = (emu_hw.dir_pin) ? "FWD" : "REV";
     const char *ena_str = (emu_hw.ena_pin == 0) ? "ON" : "OFF";
-    LINE(" dir: %s  enable: %s  stepsToGo: %d", dir_str, ena_str, shared.servo.stepsToGo);
+    LINE(" dir: %s  enable: %s  stepsToGo: %d  servoDir:%+d", dir_str, ena_str, shared.servo.stepsToGo, (int)shared.servo.servoDir);
 
     LINE("%s", "");
 
@@ -351,10 +351,10 @@ void Dashboard::drawStatePane(int startRow, int startCol, int width) {
     const char *scale_names[] = { "spindle", "z-axis ", "x-slide", "spare  " };
     for (int i = 0; i < 4; i++) {
         const char *en = shared.scales[i].syncEnable ? FG_GREEN "ON " RESET_ATTR : DIM "off" RESET_ATTR;
-        LINE(" [%d] %s  %d/%d %s  pos: %d",
-             i, scale_names[i],
-             shared.scales[i].syncRatioNum, shared.scales[i].syncRatioDen,
-             en, shared.scales[i].position);
+        LINE(" [%d] %s  %d/%d %s  dir:%+d  pos: %d",
+              i, scale_names[i],
+              shared.scales[i].syncRatioNum, shared.scales[i].syncRatioDen,
+              en, (int)shared.scales[i].scaleDir, shared.scales[i].position);
     }
 
     LINE("%s", "");
