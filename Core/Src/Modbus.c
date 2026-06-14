@@ -89,9 +89,9 @@ uint8_t numberHandlers = 0;
 
 static void sendTxBuffer(modbusHandler_t *modH);
 static int16_t getRxBuffer(modbusHandler_t *modH);
-static uint8_t validateAnswer(modbusHandler_t *modH);
+static int8_t validateAnswer(modbusHandler_t *modH);
 static void buildException( uint8_t u8exception, modbusHandler_t *modH );
-static uint8_t validateRequest(modbusHandler_t * modH);
+static int8_t validateRequest(modbusHandler_t * modH);
 static uint16_t word(uint8_t H, uint8_t l);
 static void get_FC1(modbusHandler_t *modH);
 static void get_FC3(modbusHandler_t *modH);
@@ -145,7 +145,7 @@ uint8_t RingGetAllBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer)
 }
 
 // This function must be called only after disabling USART RX interrupt
-uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint8_t uNumber)
+uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint16_t uNumber)
 {
   uint8_t uCounter;
   if(xRingBuffer->u8available == 0  || uNumber == 0 ) return 0;
@@ -713,7 +713,7 @@ void StartTaskModbusSlave(void *argument)
     }
 
     // validate message: CRC, FCT, address and size
-    uint8_t u8exception = validateRequest(modH);
+    int8_t u8exception = validateRequest(modH);
     if (u8exception > 0)
     {
       if (u8exception != ERR_TIME_OUT)
@@ -1236,7 +1236,7 @@ void get_FC3(modbusHandler_t *modH)
  * @return 0 if OK, EXCEPTION if anything fails
  * @ingroup buffer
  */
-uint8_t validateAnswer(modbusHandler_t *modH)
+int8_t validateAnswer(modbusHandler_t *modH)
 {
   // check message crc vs calculated crc
 
@@ -1332,7 +1332,7 @@ int16_t getRxBuffer(modbusHandler_t *modH)
  * @return 0 if OK, EXCEPTION if anything fails
  * @ingroup modH Modbus handler
  */
-uint8_t validateRequest(modbusHandler_t *modH)
+int8_t validateRequest(modbusHandler_t *modH)
 {
   // check message crc vs calculated crc
 

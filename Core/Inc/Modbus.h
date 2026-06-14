@@ -63,7 +63,7 @@ typedef struct
     uint8_t uxBuffer[MAX_BUFFER];
     uint8_t u8start;
     uint8_t u8end;
-    uint8_t u8available;
+    uint16_t u8available;
     bool    overflow;
 }modbusRingBuffer_t;
 
@@ -259,7 +259,7 @@ void ModbusCloseConnNull(modbusHandler_t * modH); //close the TCP connection and
 //Function prototypes for ModbusRingBuffer
 void RingAdd(modbusRingBuffer_t *xRingBuffer, uint8_t u8Val); // adds a byte to the ring buffer
 uint8_t RingGetAllBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer); // gets all the available bytes into buffer and return the number of bytes read
-uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint8_t uNumber); // gets uNumber of bytes from ring buffer, returns the actual number of bytes read
+uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint16_t uNumber); // gets uNumber of bytes from ring buffer, returns the actual number of bytes read
 uint8_t RingCountBytes(modbusRingBuffer_t *xRingBuffer); // return the number of available bytes
 void RingClear(modbusRingBuffer_t *xRingBuffer); // flushes the ring buffer
 
