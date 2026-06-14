@@ -23,6 +23,7 @@
 #include <map>
 #include <unistd.h>
 #include <pthread.h>
+#include <string>
 
 extern "C" {
 #include "FreeRTOS.h"
