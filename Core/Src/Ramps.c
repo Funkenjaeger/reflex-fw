@@ -344,6 +344,12 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   if (shared->elsStop.enable && !data->elsStopPreviousEnable) {
     shared->elsStop.referenceLatched = 0;
   }
+
+  // Auto-clear active when enable is deasserted
+  if (data->elsStopPreviousEnable && !shared->elsStop.enable) {
+    shared->elsStop.active = 0;
+  }
+
   data->elsStopPreviousEnable = shared->elsStop.enable;
 
   // Detect completion of post-resume backlash takeup move and apply phase correction

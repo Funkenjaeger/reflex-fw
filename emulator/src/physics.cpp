@@ -328,7 +328,10 @@ double LathePhysics::getLeadscrewPhase() const {
 
 double LathePhysics::getCarriageGridPhase() const {
     /* Where is the carriage relative to the leadscrew thread grid? */
-    double revolutions = carriage_mm / leadscrew_grid_spacing_mm;
+    double grid = leadscrew_grid_spacing_mm;
+    double offset = fmod(leadscrew_position_mm, grid);
+    if (offset < 0.0) offset += grid;
+    double revolutions = (carriage_mm - offset) / grid;
     double phase = fmod(revolutions, 1.0);
     if (phase < 0.0) phase += 1.0;
     return phase;
@@ -336,7 +339,9 @@ double LathePhysics::getCarriageGridPhase() const {
 
 void LathePhysics::snapCarriageToGrid() {
     double grid = leadscrew_grid_spacing_mm;
-    carriage_mm = round(carriage_mm / grid) * grid;
+    double offset = fmod(leadscrew_position_mm, grid);
+    if (offset < 0.0) offset += grid;
+    carriage_mm = round((carriage_mm - offset) / grid) * grid + offset;
     carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
 }
 
