@@ -436,7 +436,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         && shared->elsStop.zCountsPerPitch  != 0.0f
         && shared->scales[0].syncRatioDen   != 0) {
       if (shared->elsStop.backlashSteps != 0u) {
-        int32_t cuttingDir = (shared->elsStop.stopDirection >= 0) ? 1 : -1;
+        int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
         if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
           cuttingDir = -cuttingDir;
         }
