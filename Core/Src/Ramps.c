@@ -294,6 +294,14 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
   if (correction >  pitch / 2.0f) correction -= pitch;
   if (correction < -pitch / 2.0f) correction += pitch;
 
+  int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
+  if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
+    cuttingDir = -cuttingDir;
+  }
+  if (cuttingDir * correction < 0.0f) {
+    correction += (float)cuttingDir * pitch;
+  }
+
   shared->servo.stepsToGo += (int32_t)lroundf(correction);
 
   shared->elsStop.lastIdealAdvance  = idealAdvance;
@@ -355,8 +363,8 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   // Detect completion of post-resume backlash takeup move and apply phase correction
   if (shared->elsStop.takeupPending) {
     if ((int32_t)shared->servo.currentSteps == data->elsStopTakeupTargetSteps) {
-      applyPhaseCorrection(shared);
       shared->elsStop.takeupPending = 0;
+      applyPhaseCorrection(shared);
     }
   }
 
@@ -436,6 +444,8 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         && shared->elsStop.zCountsPerPitch  != 0.0f
         && shared->scales[0].syncRatioDen   != 0) {
       if (shared->elsStop.backlashSteps != 0u) {
+        shared->servo.stepsToGo    = 0;
+        shared->servo.currentSpeed = 0;
         int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
         if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
           cuttingDir = -cuttingDir;
