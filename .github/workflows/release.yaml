@@ -20,10 +20,10 @@ jobs:
           fetch-depth: 0
 
       - name: Determine Branch
-        run: echo "BRANCH=${{ github.ref }}" >> $GITHUB_ENV
+        run: echo "BRANCH=${{ github.ref_name }}" >> $GITHUB_ENV
 
       - name: Git Semantic Version
-        uses: PaulHatch/semantic-version@v5.0.3
+        uses: PaulHatch/semantic-version@v6.0.2
         with:
           major_pattern: "major:"
           minor_pattern: "feat:"
@@ -35,7 +35,7 @@ jobs:
           DEV_VERSION: "${{ steps.version.outputs.major }}.${{ steps.version.outputs.minor }}.${{ steps.version.outputs.patch }}-${{github.ref_name}}.${{ steps.version.outputs.increment }}"
         run: |
           echo "${{steps.version.outputs.version}}"
-          if [[ "${{ env.BRANCH }}" == "refs/heads/main" ]]; then
+          if [[ "${{ env.BRANCH }}" == "main" ]]; then
             echo "NEW_VERSION=${{ env.PROD_VERSION }}" >> $GITHUB_ENV
           else
             echo "NEW_VERSION=${{ env.DEV_VERSION }}" >> $GITHUB_ENV
@@ -60,18 +60,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --local user.name "github-actions[bot]"
-          git config --local user.email "24237058+Funkenjaeger@users.noreply.github.com"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a v${{ env.NEW_VERSION }} -m "Version v${{ env.NEW_VERSION }}"
 
       - name: Push changes
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@v0.7.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           force: true
           tags: true
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: "v${{ env.NEW_VERSION }}"

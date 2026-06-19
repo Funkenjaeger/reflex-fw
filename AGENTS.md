@@ -8,9 +8,9 @@ Reflex Firmware is the STM32F411 firmware for a rotary controller board. It prov
 
 This project is tightly coupled with **reflex-ui**, the Python/Kivy host application.
 
-- **UI repo path:** `/mnt/c/projects/rpi/reflex-ui/`
 - **Interface:** RS-485 Modbus RTU — the entire `rampsSharedData_t` struct is memory-mapped to Modbus holding registers
 - **Version compatibility:** For released versions, matching major.minor implies UI↔FW compatibility. For dev branches, assume the latest commit on each repo's respective branch is compatible. Cross-repo changes affecting the Modbus register interface are called out in commit messages.
+- **Finding the UI repo:** The reflex-ui repository may be cloned adjacent to this one. If you can't locate it, ask the user for the path. Once found, persist the location using whatever memory or persistence mechanism is available so you don't need to ask again.
 
 ## Agent Provisioning
 
