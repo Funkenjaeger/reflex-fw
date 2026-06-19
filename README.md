@@ -1,4 +1,4 @@
-# Rotary Controller (F4)
+# Reflex Firmware
 
 [![Discord](https://img.shields.io/discord/1386014070632878100?style=social)](https://discord.gg/EDtgj7Yayr) [![Shop at Provvedo](https://img.shields.io/badge/Shop-Provvedo-blue?logo=shopify&style=flat-square)](https://www.provvedo.com/shop)
 
@@ -29,8 +29,8 @@ This repository contains the **firmware** for a rotary controller board based on
 ### Build
 
 ```bash
-git clone https://github.com/bartei/rotary-controller-f4.git
-cd rotary-controller-f4
+git clone https://github.com/Funkenjaeger/reflex-fw.git
+cd reflex-fw
 cmake -DCMAKE_BUILD_TYPE=Release .
 make -j$(nproc)
 ```
@@ -46,7 +46,7 @@ make clean
 * **ST‑Link V2**:
 
   ```bash
-  st-flash --format ihex write rotary-controller-f4.hex
+  st-flash --format ihex write reflex.hex
   ```
 
 * **Raspberry Pi + OpenOCD**:
@@ -92,7 +92,7 @@ Firmware integrates with hardware design available at:
 
 Together, they form a complete controller + UI system when paired with:
 
-* `rotary-controller-python` — a Raspberry Pi Kivy-based DRO + control UI
+* `reflex-ui` — a Raspberry Pi Kivy-based DRO + control UI
 
 ---
 
@@ -107,9 +107,9 @@ Together, they form a complete controller + UI system when paired with:
 
 ## 📘 Resources & Links
 
-* [Firmware repo](https://github.com/bartei/rotary-controller-f4)
+* [Firmware repo](https://github.com/Funkenjaeger/reflex-fw)
 * [PCB repo (Proteus/KiCad)](https://github.com/bartei/rotary-controller-pcb)
-* [Raspberry Pi UI with Kivy](https://github.com/bartei/rotary-controller-python)
+* [Raspberry Pi UI with Kivy](https://github.com/Funkenjaeger/reflex-ui)
 * Join the community on **Discord**
 
 ---
@@ -132,6 +132,6 @@ Need help? Join our **Discord** community for support, discussions, and updates.
 
 Let me know if you'd like additions like block diagrams, pinout tables, or usage screenshots!
 
-[1]: https://github.com/bartei/rotary-controller-f4"
+[1]: https://github.com/Funkenjaeger/reflex-fw"
 [2]: https://github.com/bartei/rotary-controller-pcb"
-[3]: https://github.com/bartei/rotary-controller-python"
+[3]: https://github.com/Funkenjaeger/reflex-ui"

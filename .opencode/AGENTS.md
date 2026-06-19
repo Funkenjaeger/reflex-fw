@@ -1,4 +1,4 @@
-# AGENTS.md — Rotary Controller F4
+# AGENTS.md — Reflex Firmware
 
 ## Building
 
@@ -7,7 +7,7 @@
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
-Outputs: `build/rotary-controller-f4.elf`, `.hex`, `.bin`.
+Outputs: `build/reflex.elf`, `.hex`, `.bin`.
 
 ### Emulator (native, x86_64)
 ```bash
