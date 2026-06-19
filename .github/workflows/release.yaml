@@ -24,9 +24,6 @@ jobs:
 
       - name: Git Semantic Version
         uses: PaulHatch/semantic-version@v6.0.2
-        with:
-          major_pattern: "major:"
-          minor_pattern: "feat:"
         id: version
 
       - name: Create New Format Version
