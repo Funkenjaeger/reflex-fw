@@ -1,11 +1,16 @@
 # Reflex Firmware
 
-[![Discord](https://img.shields.io/discord/1386014070632878100?style=social)](https://discord.gg/EDtgj7Yayr) [![Shop at Provvedo](https://img.shields.io/badge/Shop-Provvedo-blue?logo=shopify&style=flat-square)](https://www.provvedo.com/shop)
+This repository contains the **firmware** for a digital controller board based on the **STM32F411** microcontroller. It provides Digital Read Out (DRO) and Electronic Leadscrew (ELS) functionality for lathes when integrated with the corresponding [Reflex UI software](https://github.com/Funkenjaeger/reflex-ui).
 
+This firmware handles all necessary low-level real-time control functionality for operations including:
+ - Jogging (with trapezoidal velocity profile)
+ - Spindle-synchronized carriage feed for controlled feeding or threading operations (standard ELS functionality)
+ - Automatic electronic stop, usable when feeding or threading
+ - Electronic retract
+ - Automatic phase re-sync to thread pitch between passes (allows free use of half nut between threading passes)
 
-This repository contains the **firmware** for a rotary controller board based on the **STM32F411** microcontroller ([github.com][1]). It provides Digital Read Out (DRO) and single-axis control for CNC-style rotary tables.
-
-🛒 **Purchase all boards from our shop:** [Provvedo Shop](https://www.provvedo.com/shop)
+This firmware is based on the [rotary-controller-f4](https://github.com/bartei/rotary-controller-f4) project and as of the present version, remains compatible with the associated hardware.  
+This project (along with the corresponding UI SW project) was hard forked from the original primarily due to natural divergence that followed from a focus on lathe use cases, where the original rotary-controller project was designed for CNC-style rotary table use cases.
 
 ---
 
@@ -14,8 +19,8 @@ This repository contains the **firmware** for a rotary controller board based on
 * Utilizes **STM32CubeMX** for hardware configuration (.ioc file included)
 * Modular firmware structure with FreeRTOS support
 * Supports ST‑Link V2 and Raspberry Pi + OpenOCD programming
-* Optimized for high-speed encoder + stepper motor control
-* Includes a native lathe emulator for hardware-free testing with the Python GUI
+* Optimized for high-speed encoder + stepper/servo motor control
+* Includes a native FW+lathe emulator for hardware-free testing with the Python GUI
 
 ---
 
@@ -31,14 +36,14 @@ This repository contains the **firmware** for a rotary controller board based on
 ```bash
 git clone https://github.com/Funkenjaeger/reflex-fw.git
 cd reflex-fw
-cmake -DCMAKE_BUILD_TYPE=Release .
-make -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
 ### Clean
 
 ```bash
-make clean
+rm -rf build
 ```
 
 ### Flash
@@ -46,7 +51,7 @@ make clean
 * **ST‑Link V2**:
 
   ```bash
-  st-flash --format ihex write reflex.hex
+  st-flash --format ihex write build/reflex-fw.hex
   ```
 
 * **Raspberry Pi + OpenOCD**:
@@ -88,50 +93,15 @@ cmake --build build
 
 Firmware integrates with hardware design available at:
 
-* **PCB repo**: bartei/rotary-controller-pcb — includes Proteus schematic, BOM (with pricing), and fab files; KiCad version in progress ([github.com][2], [github.com][3], [github.com][1])
+* **Compatible PCB**: [rotary-controller-pcb](https://github.com/bartei/rotary-controller-pcb)
 
 Together, they form a complete controller + UI system when paired with:
 
-* `reflex-ui` — a Raspberry Pi Kivy-based DRO + control UI
+* [reflex-ui](https://github.com/Funkenjaeger/reflex-ui) — a Raspberry Pi Kivy-based DRO + control UI
 
 ---
 
-## 🛎️ Usage Notes
+## 📄 License
 
-* Works as a **single-axis rotary DRO**
-* FreeRTOS scheduler handles encoder sampling loop
-* GPIO/button routines support nudge and rotary button functions
-* SWD pins must be appropriately wired and matched in length
+Licensed under MIT. See `LICENSE` for full terms.
 
----
-
-## 📘 Resources & Links
-
-* [Firmware repo](https://github.com/Funkenjaeger/reflex-fw)
-* [PCB repo (Proteus/KiCad)](https://github.com/bartei/rotary-controller-pcb)
-* [Raspberry Pi UI with Kivy](https://github.com/Funkenjaeger/reflex-ui)
-* Join the community on **Discord**
-
----
-
-## ✅ Next Steps
-
-1. Test hardware interface in CubeMX; verify pin assignments
-2. Build and flash firmware, connect to DRO UI app
-3. Utilize FreeRTOS for real-time sampling and control
-4. Contribute improvements — e.g. KiCad support, UI features, multi-axis
-
----
-
-## 📝 Contact & Support
-
-Need help? Join our **Discord** community for support, discussions, and updates.
-
-
----
-
-Let me know if you'd like additions like block diagrams, pinout tables, or usage screenshots!
-
-[1]: https://github.com/Funkenjaeger/reflex-fw"
-[2]: https://github.com/bartei/rotary-controller-pcb"
-[3]: https://github.com/Funkenjaeger/reflex-ui"
