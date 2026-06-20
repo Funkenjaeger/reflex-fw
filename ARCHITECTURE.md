@@ -167,7 +167,7 @@ Field-level semantics (units, sign conventions, who writes what) are documented 
 
 ```bash
 # ST-Link
-st-flash --format ihex write rotary-controller-f4.hex
+st-flash --format ihex write reflex.hex
 
 # Raspberry Pi + OpenOCD
 openocd -f ./raspberry.cfg

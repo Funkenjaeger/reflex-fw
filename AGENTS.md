@@ -1,4 +1,22 @@
-# AGENTS.md — Rotary Controller F4
+# AGENTS.md — Reflex Firmware
+
+## Project Overview
+
+Reflex Firmware is the STM32F411 firmware for a rotary controller board. It provides Digital Read Out (DRO) and single-axis control for CNC-style rotary tables, communicating with the host UI over RS-485/Modbus RTU.
+
+## Sibling Repos
+
+This project is tightly coupled with **reflex-ui**, the Python/Kivy host application.
+
+- **Interface:** RS-485 Modbus RTU — the entire `rampsSharedData_t` struct is memory-mapped to Modbus holding registers
+- **Version compatibility:** For released versions, matching major.minor implies UI↔FW compatibility. For dev branches, assume the latest commit on each repo's respective branch is compatible. Cross-repo changes affecting the Modbus register interface are called out in commit messages.
+- **Finding the UI repo:** The reflex-ui repository may be cloned adjacent to this one. If you can't locate it, ask the user for the path. Once found, persist the location using whatever memory or persistence mechanism is available so you don't need to ask again.
+
+## Agent Provisioning
+
+This project has a sibling repository (reflex-ui) that agents may need to reference.
+If your runtime supports workspace or permission configuration, grant read access to the sibling repo path.
+For opencode, this means configuring `external_directory` permission in your project config to allow access to the reflex-ui repository.
 
 ## Building
 
@@ -7,7 +25,7 @@
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
-Outputs: `build/rotary-controller-f4.elf`, `.hex`, `.bin`.
+Outputs: `build/reflex.elf`, `.hex`, `.bin`.
 
 ### Emulator (native, x86_64)
 ```bash
