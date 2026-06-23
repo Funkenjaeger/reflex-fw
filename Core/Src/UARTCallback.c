@@ -117,6 +117,19 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 				__HAL_DMA_DISABLE_IT(mHandlers[i]->port->hdmarx, DMA_IT_HT); // we don't need half-transfer interrupt
 
     		}
+    		else if(mHandlers[i]->xTypeHW == USART_HW)
+    		{
+    			/* Interrupt (non-DMA) RX recovery.
+    			 * A USART overrun (ORE) occurs when the lowest-priority USART1 RX
+    			 * interrupt is starved by the 100 kHz step-generation timer ISR
+    			 * (TIM9 -> SynchroRefreshTimerIsr, NVIC prio 5). The HAL treats ORE
+    			 * as a blocking error: it ends the RX transfer and never re-arms it,
+    			 * so Modbus RX stays dead until the master gives up and reconnects.
+    			 * Clear the error flags (SR+DR read) and re-arm the 1-byte receive so
+    			 * a dropped byte costs a single retried poll, not a full reconnect. */
+    			__HAL_UART_CLEAR_OREFLAG(huart);
+    			HAL_UART_Receive_IT(huart, &mHandlers[i]->dataRX, 1);
+    		}
 
     		break;
     	}
