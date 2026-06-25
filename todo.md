@@ -5,6 +5,18 @@ instead of leaving bare `TODO:` comments in code.
 
 ---
 
+## Repo admin
+
+### Switch default branch back to `main` once the first release is pushed
+- **Why:** `hard-fork` (the old default + fork-import branch) has been retired. The
+  default branch is temporarily set to **`dev`** so day-to-day work has a sensible
+  default without touching `main` (a push to `main` triggers the release pipeline,
+  and we want the first release to be solid first).
+- **Do when:** the first real release is ready to ship from `main`.
+- **How:** `gh repo edit --default-branch main`, then `git remote set-head origin main`.
+- Lineage at the time of the switch: `main` ──(+8)──► (old `hard-fork`) ──► `dev`
+  (dev contains everything). Decide whether to advance `main` first.
+
 ## Modbus communication
 
 ### Modbus RX DMA — shelved, needs on-hardware debugging
