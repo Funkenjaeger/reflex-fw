@@ -12,6 +12,12 @@
 extern "C" {
 #endif
 
+/* The real HAL provides this macro to clear the USART overrun flag; the firmware
+ * overrun-recovery path (UARTCallback.c) uses it. No-op it for the emulator. */
+#ifndef __HAL_UART_CLEAR_OREFLAG
+#define __HAL_UART_CLEAR_OREFLAG(__HANDLE__) ((void)(__HANDLE__))
+#endif
+
 /* UART State */
 #define HAL_UART_STATE_RESET     0x00000000U
 #define HAL_UART_STATE_READY     0x00000020U
