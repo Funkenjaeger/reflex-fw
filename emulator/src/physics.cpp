@@ -41,6 +41,7 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
     half_nut_state = cfg.z_half_nut_engaged ? ENGAGED : DISENGAGED;
     half_nut_request_pending = false;
     backlash_offset = z_backlash_mm;  /* assume nut starts on "+ wall" so first +Z motion drives carriage */
+    last_manual_dir = 0.0;
 
     cross_slide_mm = cfg.x_initial_mm;
 
@@ -116,11 +117,19 @@ void LathePhysics::tick(double dt, const void *shared_data) {
             bool leadscrew_moving = shared && std::abs(shared->servo.currentSpeed) > 0.1;
 
             if (!leadscrew_moving) {
-                /* Leadscrew stationary: snap carriage to nearest grid point and engage */
+                /* Leadscrew stationary: snap carriage to nearest grid point and engage.
+                 * Set the lash wall from the last manual move direction: after the
+                 * operator hand-moves the carriage (nut open) and re-closes, the nut
+                 * rests on the wall opposite the next drive direction, so the first
+                 * leadscrew move back the other way must traverse the full lash.
+                 * (Moved +Z -> rest on +wall; moved -Z -> rest on -wall.) */
                 snapCarriageToGrid();
+                if (last_manual_dir > 0.0)      backlash_offset = z_backlash_mm;
+                else if (last_manual_dir < 0.0) backlash_offset = 0.0;
                 half_nut_state = ENGAGED;
                 half_nut_request_pending = false;
-                emu_log_event("half-nut ENGAGED (snap to %.3f mm)", carriage_mm);
+                emu_log_event("half-nut ENGAGED (snap to %.3f mm, lash=%.3f)",
+                              carriage_mm, backlash_offset);
             } else {
                 /* Leadscrew turning: wait for phase alignment */
                 if (half_nut_state != ENGAGING) {
@@ -182,7 +191,9 @@ void LathePhysics::tick(double dt, const void *shared_data) {
         } else {
             z_jog_velocity = z_target_vel;
         }
-        carriage_mm += z_jog_velocity * dt;
+        double z_step = z_jog_velocity * dt;
+        if (std::abs(z_step) > 1e-9) last_manual_dir = (z_step > 0) ? 1.0 : -1.0;
+        carriage_mm += z_step;
         carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
     } else {
         z_jog_velocity = 0.0;
@@ -341,8 +352,12 @@ void LathePhysics::snapCarriageToGrid() {
     double grid = leadscrew_grid_spacing_mm;
     double offset = fmod(leadscrew_position_mm, grid);
     if (offset < 0.0) offset += grid;
+    double before = carriage_mm;
     carriage_mm = round((carriage_mm - offset) / grid) * grid + offset;
     carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
+    emu_log_event("SNAP before=%.4f after=%.4f grid=%.4f offset=%.4f lsPos=%.4f dZ=%.4f",
+                  before, carriage_mm, grid, offset, leadscrew_position_mm,
+                  carriage_mm - before);
 }
 
 bool LathePhysics::checkPhaseAlignment() const {

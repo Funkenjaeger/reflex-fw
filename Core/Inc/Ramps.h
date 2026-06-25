@@ -140,6 +140,8 @@ typedef struct {
   uint16_t elsStopPreviousActive;
   uint16_t elsStopPreviousEnable;
   int32_t  elsStopTakeupTargetSteps;  // servo.currentSteps target value at end of post-resume backlash takeup
+  int32_t  elsStopTakeupSign;         // direction of the takeup move (+1/-1); completion is a crossing test, not exact equality
+  int32_t  elsStopSettleCount;        // ticks elapsed since takeup commanded-complete; dwell before phase-correction Z snapshot
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

@@ -61,6 +61,10 @@ public:
     double getLeadscrewPositionMM() const { return leadscrew_position_mm; }
     double getLeadscrewGridSpacingMM() const { return leadscrew_grid_spacing_mm; }
 
+    /* Lash window position: 0 = on -wall, z_backlash_mm = on +wall. Used by the
+     * ELS scenario to verify the takeup loads the correct (cutting-side) wall. */
+    double getBacklashOffsetMM() const { return backlash_offset; }
+
 private:
     /* Config */
     double spindle_inertia;
@@ -91,6 +95,8 @@ private:
     HalfNutState half_nut_state;
     bool   half_nut_request_pending;
     double backlash_offset;    /* nut position within play window: [0, z_backlash_mm] */
+    double last_manual_dir;    /* sign of last manual (disengaged) carriage move; sets the
+                                * lash wall the nut rests on when the half-nut re-engages */
 
     /* Cross-slide state */
     double cross_slide_mm;

@@ -18,6 +18,19 @@
 #include <math.h>
 #include "Ramps.h"
 #include "Scales.h"
+#include "els_phase.h"
+
+/* Post-takeup settle dwell: after the backlash takeup reaches its commanded
+ * target step count, the step/dir servo may still be closing following error /
+ * settling. Snapshotting the Z DRO then yields a takeup-speed-dependent (hence
+ * backlash-dependent) phase error. Hold position for this many ISR ticks before
+ * sampling Z in applyPhaseCorrection. ISR runs at ~100 kHz (TIM9, 10 us/tick),
+ * so 100000 ticks ~= 1 s. The settling hypothesis was REFUTED on hardware (the
+ * 1 s dwell changed nothing) and in the emulator (the carriage genuinely doesn't
+ * move during a lash-absorbed takeup, so there is nothing to settle), so this is
+ * now a short, behaviour-neutral guard rather than a real settle window. Keep it
+ * small so the emulator's bounded-guard scenario loop doesn't time out. */
+#define ELS_SETTLE_TICKS 50
 
 #ifdef EMULATOR_BUILD
 #include "emulator_state.h"
@@ -280,34 +293,22 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
   int32_t deltaZ =
     shared->scales[shared->elsStop.scaleIndex].position - shared->elsStop.latchedZ;
 
-  float idealAdvance =
-    (float)deltaSpindle * (float)shared->scales[0].syncRatioNum
-    / (float)shared->scales[0].syncRatioDen;
+  /* Pure, unit-tested phase-correction math (els_phase.h). The phaseError sign
+   * is derived from stopDirection*cuttingDir so the Z-stop lands in phase for
+   * BOTH DRO/leadscrew polarities — using the fixed ideal-actual form made the
+   * thread phase walk 2x the backlash on machines where they run opposite. */
+  elsCorrResult_t r = elsComputePhaseCorrection(
+      deltaSpindle, deltaZ,
+      shared->scales[0].syncRatioNum, shared->scales[0].syncRatioDen,
+      shared->elsStop.threadPitchSteps, shared->elsStop.zCountsPerPitch,
+      shared->elsStop.stopDirection);
 
-  float actualAdvance =
-    (float)deltaZ * shared->elsStop.threadPitchSteps
-    / shared->elsStop.zCountsPerPitch;
+  shared->servo.stepsToGo += r.stepsToAdd;
 
-  float phaseError = idealAdvance - actualAdvance;
-  float pitch      = shared->elsStop.threadPitchSteps;
-  float correction = fmodf(phaseError, pitch);
-  if (correction >  pitch / 2.0f) correction -= pitch;
-  if (correction < -pitch / 2.0f) correction += pitch;
-
-  int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
-  if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
-    cuttingDir = -cuttingDir;
-  }
-  if (cuttingDir * correction < 0.0f) {
-    correction += (float)cuttingDir * pitch;
-  }
-
-  shared->servo.stepsToGo += (int32_t)lroundf(correction);
-
-  shared->elsStop.lastIdealAdvance  = idealAdvance;
-  shared->elsStop.lastActualAdvance = actualAdvance;
-  shared->elsStop.lastPhaseError    = phaseError;
-  shared->elsStop.lastCorrection    = correction;
+  shared->elsStop.lastIdealAdvance  = r.idealAdvance;
+  shared->elsStop.lastActualAdvance = r.actualAdvance;
+  shared->elsStop.lastPhaseError    = r.phaseError;
+  shared->elsStop.lastCorrection    = r.correction;
 
 #ifdef EMULATOR_BUILD
   /* Arm step_6 trace: snapshot starting state so per-tick logs can report
@@ -331,7 +332,7 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
                 (int)shared->scales[0].position,
                 (int)shared->scales[shared->elsStop.scaleIndex].position,
                 (int)shared->servo.stepsToGo,
-                (double)correction);
+                (double)r.correction);
 #endif
 }
 
@@ -358,11 +359,27 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
   data->elsStopPreviousEnable = shared->elsStop.enable;
 
-  // Detect completion of post-resume backlash takeup move and apply phase correction
+  // Detect completion of post-resume backlash takeup move, dwell for the servo
+  // to settle, then apply phase correction. takeupPending stays set during the
+  // dwell so sync remains gated and the servo holds at the takeup target.
   if (shared->elsStop.takeupPending) {
-    if ((int32_t)shared->servo.currentSteps == data->elsStopTakeupTargetSteps) {
-      shared->elsStop.takeupPending = 0;
-      applyPhaseCorrection(shared);
+    // Crossing test (not exact equality): the servo emits one step per servoCycle
+    // while desiredSteps can advance several steps per tick, so currentSteps may
+    // skip the exact target (esp. across the reversal pulse-skip). Treat the
+    // takeup as complete once currentSteps reaches or passes the target in the
+    // takeup direction.
+    int32_t cur = (int32_t)shared->servo.currentSteps;
+    bool takeupReached = (data->elsStopTakeupSign >= 0)
+                         ? (cur >= data->elsStopTakeupTargetSteps)
+                         : (cur <= data->elsStopTakeupTargetSteps);
+    if (takeupReached) {
+      if (data->elsStopSettleCount < ELS_SETTLE_TICKS) {
+        data->elsStopSettleCount++;        // dwell after commanded-complete
+      } else {
+        data->elsStopSettleCount = 0;
+        shared->elsStop.takeupPending = 0;
+        applyPhaseCorrection(shared);       // snapshot Z only once settled
+      }
     }
   }
 
@@ -444,6 +461,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
       if (shared->elsStop.backlashSteps != 0u) {
         shared->servo.stepsToGo    = 0;
         shared->servo.currentSpeed = 0;
+        data->elsStopSettleCount   = 0;
         int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
         if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
           cuttingDir = -cuttingDir;
@@ -451,6 +469,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         int32_t signedTakeup = cuttingDir * (int32_t)shared->elsStop.backlashSteps;
         shared->servo.stepsToGo       += signedTakeup;
         data->elsStopTakeupTargetSteps = (int32_t)shared->servo.currentSteps + signedTakeup;
+        data->elsStopTakeupSign        = (signedTakeup >= 0) ? 1 : -1;
         shared->elsStop.takeupPending  = 1;
       } else {
         applyPhaseCorrection(shared);

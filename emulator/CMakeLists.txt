@@ -69,3 +69,11 @@ set_source_files_properties(${SHIM_SOURCES} ${EMU_SOURCES} PROPERTIES LANGUAGE C
 set_source_files_properties(${FW_SOURCES} ${CMAKE_SOURCE_DIR}/shim/hal_shim.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11"
 )
+
+# --- Unit tests ---
+enable_testing()
+
+# Pure ELS phase-correction permutation tests (no HAL/shim deps; just els_phase.h).
+add_executable(els_phase_test ${CMAKE_SOURCE_DIR}/test/els_phase_test.cpp)
+target_link_libraries(els_phase_test m)
+add_test(NAME els_phase_test COMMAND els_phase_test)
