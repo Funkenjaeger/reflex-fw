@@ -114,6 +114,7 @@ subdir.mk
 
 # Emulator build
 /emulator/build*/
+emulator.log
 
 # AI
 .claude/

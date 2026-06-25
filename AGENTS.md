@@ -1,5 +1,16 @@
 # AGENTS.md — Reflex Firmware
 
+## Todo Tracking
+
+When you encounter a task, follow-up item, or piece of work that should be tracked, add it to `todo.md` in the project root. This applies to:
+- Deferred work discovered during development
+- `TODO`/`FIXME` comments that appear in code or documentation
+- Bugs or improvements identified during debugging
+- Hardware workarounds that should be removed on a future board revision
+- Any action item that won't be completed in the current session
+
+Do NOT leave `TODO`/`FIXME` comments in code, documentation, or bash snippets — always route them to `todo.md` instead.
+
 ## Project Overview
 
 Reflex Firmware is the STM32F411 firmware for a rotary controller board. It provides Digital Read Out (DRO) and single-axis control for CNC-style rotary tables, communicating with the host UI over RS-485/Modbus RTU.
