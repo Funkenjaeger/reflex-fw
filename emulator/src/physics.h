@@ -81,6 +81,17 @@ private:
     double x_max_mm, x_min_mm;
     double x_manual_step_mm;
 
+    /* PHYSICAL wiring signs (+1/-1), independent of the firmware canonicalization
+     * registers (scaleDir/servoDir) that reflex-ui writes. These model how the
+     * real machine happens to be wired -- encoder cable orientation / motor
+     * wiring -- which the operator's UI reversing toggle must cancel. Applied in
+     * the encoder-count getters and onStepPulse; NOT the same as the Modbus
+     * scaleDir/servoDir registers (which the host overwrites on connect). */
+    int    spindle_scale_sign;
+    int    z_scale_sign;
+    int    x_scale_sign;
+    int    servo_sign;
+
     /* Spindle state */
     double spindle_theta;         /* cumulative angle in radians */
     double spindle_omega;         /* angular velocity in rad/s */

@@ -30,6 +30,12 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
     x_min_mm = cfg.x_min_mm;
     x_manual_step_mm = cfg.x_manual_step_mm;
 
+    /* Physical wiring signs (see physics.h). Default +1 => no change. */
+    spindle_scale_sign = (cfg.spindle_scale_dir < 0) ? -1 : 1;
+    z_scale_sign       = (cfg.z_scale_dir < 0) ? -1 : 1;
+    x_scale_sign       = (cfg.x_scale_dir < 0) ? -1 : 1;
+    servo_sign         = (cfg.servo_dir < 0) ? -1 : 1;
+
     spindle_theta = 0.0;
     spindle_omega = cfg.spindle_initial_rpm * 2.0 * M_PI / 60.0;
     spindle_target_rpm = cfg.spindle_initial_rpm;
@@ -241,15 +247,20 @@ void LathePhysics::tick(double dt, const void *shared_data) {
 }
 
 void LathePhysics::onStepPulse(int direction) {
-    /* direction: +1 or -1, from DIR pin */
+    /* direction: +1 or -1, from DIR pin (set by the firmware's servoDir register).
+     * servo_sign models the PHYSICAL motor wiring: on a reverse-wired motor the
+     * same DIR pin drives the leadscrew the opposite physical way. This is
+     * independent of servoDir, which reflex-ui owns -- the operator's servo
+     * reverse toggle must cancel servo_sign for a commanded +move to go +. */
+    int phys_dir = direction * servo_sign;
     leadscrew_total_steps += direction;
-    leadscrew_position_mm += direction * leadscrew_mm_per_step;
+    leadscrew_position_mm += phys_dir * leadscrew_mm_per_step;
 
     if (half_nut_state == ENGAGED) {
         /* Faithful (non-lossy) backlash model: track nut position within play window
          * [0, z_backlash_mm]. Carriage only moves when nut hits a wall and pushes.
          * Partial reversals only consume the actual traversal distance. */
-        double move = direction * leadscrew_mm_per_step;
+        double move = phys_dir * leadscrew_mm_per_step;
         double new_offset = backlash_offset + move;
 
         if (new_offset > z_backlash_mm) {
@@ -284,7 +295,7 @@ int64_t LathePhysics::getSpindleEncoderCounts() const {
     /* Convert cumulative angle to encoder counts.
      * This wraps at 16-bit for TIM1 (which is how the real encoder works). */
     double counts = spindle_theta / (2.0 * M_PI) * spindle_counts_per_rev;
-    return (int64_t)counts;
+    return (int64_t)counts * spindle_scale_sign;
 }
 
 void LathePhysics::requestHalfNutToggle() {
@@ -307,7 +318,7 @@ void LathePhysics::moveCarriageTo(double target_mm) {
 }
 
 int64_t LathePhysics::getCarriageEncoderCounts() const {
-    return (int64_t)(carriage_mm * z_counts_per_mm);
+    return (int64_t)(carriage_mm * z_counts_per_mm) * z_scale_sign;
 }
 
 void LathePhysics::jogCrossSlide(int direction) {
@@ -324,7 +335,7 @@ void LathePhysics::moveCrossSlideTo(double target_mm) {
 }
 
 int64_t LathePhysics::getCrossSlideEncoderCounts() const {
-    return (int64_t)(cross_slide_mm * x_counts_per_mm);
+    return (int64_t)(cross_slide_mm * x_counts_per_mm) * x_scale_sign;
 }
 
 /* --- Half-nut engagement helpers --- */
