@@ -336,12 +336,19 @@ static void runPhysicsServer(LathePhysics *physics, rampsHandler_t *rampsData,
         }
 
         // Manual retract: open half-nut, hand-move carriage home, re-engage.
+        // Park on a lattice-aligned position so the re-engage snap is a no-op
+        // and legacy stationary re-engagements stay deterministic. Computed
+        // per stop: the lattice offset shifts every pass (takeup/correction
+        // move the leadscrew), but it is frozen between the stop trigger and
+        // re-engage (sync is gated while active=1, released by the host only
+        // after we re-engage).
         physics->requestHalfNutToggle();
         ms(80);
-        physics->moveCarriageTo(homeMM);
+        double alignedHome = physics->nearestGridPositionMM(homeMM);
+        physics->moveCarriageTo(alignedHome);
         int guard = 0;
         while ((physics->isZMoveTargetActive()
-                || std::abs(physics->getCarriageMM() - homeMM) > 0.02)
+                || std::abs(physics->getCarriageMM() - alignedHome) > 0.02)
                && g_running.load() && guard < 8000) { ms(2); guard++; }
         ms(120);
         physics->requestHalfNutToggle();

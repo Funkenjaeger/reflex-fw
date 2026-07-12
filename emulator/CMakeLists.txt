@@ -77,3 +77,13 @@ enable_testing()
 add_executable(els_phase_test ${CMAKE_SOURCE_DIR}/test/els_phase_test.cpp)
 target_link_libraries(els_phase_test m)
 add_test(NAME els_phase_test COMMAND els_phase_test)
+
+# Half-nut engagement physics tests: exercise LathePhysics directly. Links
+# physics.cpp + config.cpp (EmuConfig ctor); the test file stubs the shim
+# externals (emu_hw, emu_log_event, emu_update_timer_counters), so hal_shim.c
+# is deliberately NOT linked.
+add_executable(els_halfnut_test ${CMAKE_SOURCE_DIR}/test/els_halfnut_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/physics.cpp
+    ${CMAKE_SOURCE_DIR}/src/config.cpp)
+target_link_libraries(els_halfnut_test m)
+add_test(NAME els_halfnut_test COMMAND els_halfnut_test)
