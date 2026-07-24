@@ -9,7 +9,6 @@
 
 extern "C" {
 #include "emulator_state.h"
-#include "Ramps.h"
 void emu_update_timer_counters(void);
 }
 
@@ -30,6 +29,12 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
     x_min_mm = cfg.x_min_mm;
     x_manual_step_mm = cfg.x_manual_step_mm;
 
+    /* Physical wiring signs (see physics.h). Default +1 => no change. */
+    spindle_scale_sign = (cfg.spindle_scale_dir < 0) ? -1 : 1;
+    z_scale_sign       = (cfg.z_scale_dir < 0) ? -1 : 1;
+    x_scale_sign       = (cfg.x_scale_dir < 0) ? -1 : 1;
+    servo_sign         = (cfg.servo_dir < 0) ? -1 : 1;
+
     spindle_theta = 0.0;
     spindle_omega = cfg.spindle_initial_rpm * 2.0 * M_PI / 60.0;
     spindle_target_rpm = cfg.spindle_initial_rpm;
@@ -41,7 +46,14 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
     half_nut_state = cfg.z_half_nut_engaged ? ENGAGED : DISENGAGED;
     half_nut_request_pending = false;
     backlash_offset = z_backlash_mm;  /* assume nut starts on "+ wall" so first +Z motion drives carriage */
-    last_manual_dir = 0.0;
+
+    time_since_step_s = 1e9;  /* no pulses yet: leadscrew reads stationary */
+    last_phys_dir = 0;
+    {
+        unsigned seed = 0x5EED1A7E;  /* fixed default: reproducible runs */
+        if (const char *s = getenv("EMU_SEED")) seed = (unsigned)strtoul(s, nullptr, 0);
+        lash_rng.seed(seed);
+    }
 
     cross_slide_mm = cfg.x_initial_mm;
 
@@ -60,7 +72,9 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
 }
 
 void LathePhysics::tick(double dt, const void *shared_data) {
-    const rampsSharedData_t *shared = (const rampsSharedData_t *)shared_data;
+    (void)shared_data;  /* signature kept for callers; firmware state is no longer read here */
+    time_since_step_s += dt;
+
     /* --- Spindle dynamics --- */
     double target_omega = spindle_target_rpm * 2.0 * M_PI / 60.0;
     double error = target_omega - spindle_omega;
@@ -112,24 +126,39 @@ void LathePhysics::tick(double dt, const void *shared_data) {
     if (half_nut_request_pending) {
         if (half_nut_state == DISENGAGED || half_nut_state == ENGAGING) {
             /* Request to engage.
-             * The leadscrew moves only when the firmware's servo is producing
-             * steps (sync enabled + spindle turning). Check actual servo speed. */
-            bool leadscrew_moving = shared && std::abs(shared->servo.currentSpeed) > 0.1;
+             * "Moving" is judged from our own recent step-pulse activity, NOT
+             * from shared->servo.currentSpeed: that is the indexing/jog ramp
+             * variable, pinned to 0 during pure ELS sync (sync bypasses the
+             * ramp and adds straight to desiredSteps), so it read the
+             * leadscrew as stationary mid-cut and snap-teleported the
+             * carriage instead of taking the phase-match path.
+             * Caveats: (a) main.cpp edge-detects STEP once per tick post-ISR,
+             * so back-to-back pulses at the ~10k steps/s ceiling can miss
+             * edges — no workflow engages during a full-speed retract, so
+             * accepted; (b) below ~10 Hz pulse rate (≈1 RPM sync) the gate
+             * reads stationary and the snap path runs, matching an operator
+             * hand-jogging the nut in; (c) if pulses pause >window while
+             * ENGAGING (e.g. an ELS stop fires), the request completes via
+             * the snap path below — intended fallback, see the WARN. */
+            bool leadscrew_moving = time_since_step_s < STEP_ACTIVITY_WINDOW_S;
 
             if (!leadscrew_moving) {
-                /* Leadscrew stationary: snap carriage to nearest grid point and engage.
-                 * Set the lash wall from the last manual move direction: after the
-                 * operator hand-moves the carriage (nut open) and re-closes, the nut
-                 * rests on the wall opposite the next drive direction, so the first
-                 * leadscrew move back the other way must traverse the full lash.
-                 * (Moved +Z -> rest on +wall; moved -Z -> rest on -wall.) */
-                snapCarriageToGrid();
-                if (last_manual_dir > 0.0)      backlash_offset = z_backlash_mm;
-                else if (last_manual_dir < 0.0) backlash_offset = 0.0;
+                /* Leadscrew stationary: snap carriage to nearest grid point
+                 * and engage. Where the nut lands within the lash window is
+                 * operator-arbitrary (nothing loads it against a wall until
+                 * the leadscrew turns), so draw a uniform drop-in position. */
+                double dz = snapCarriageToGrid();
+                if (std::abs(dz) > PHASE_TOL_FRAC * leadscrew_grid_spacing_mm) {
+                    emu_log_event("WARN half-nut snap teleported carriage %.4f mm "
+                                  "(> %.4f mm tol) — unphysical convenience engage",
+                                  dz, PHASE_TOL_FRAC * leadscrew_grid_spacing_mm);
+                }
+                backlash_offset = std::uniform_real_distribution<double>(
+                                      0.0, z_backlash_mm)(lash_rng);
                 half_nut_state = ENGAGED;
                 half_nut_request_pending = false;
-                emu_log_event("half-nut ENGAGED (snap to %.3f mm, lash=%.3f)",
-                              carriage_mm, backlash_offset);
+                emu_log_event("half-nut ENGAGED (snap to %.3f mm, dz=%.4f, lash=%.3f)",
+                              carriage_mm, dz, backlash_offset);
             } else {
                 /* Leadscrew turning: wait for phase alignment */
                 if (half_nut_state != ENGAGING) {
@@ -137,9 +166,17 @@ void LathePhysics::tick(double dt, const void *shared_data) {
                     emu_log_event("half-nut ENGAGING...");
                 }
                 if (checkPhaseAlignment()) {
+                    /* Physical seating: the nut drops onto the thread, taking
+                     * up the ≤PHASE_TOL_FRAC residual exactly, and rests on
+                     * the wall OPPOSITE the drive direction — worst case, the
+                     * full lash transient runs before the carriage moves. */
+                    double dz = snapCarriageToGrid();
+                    backlash_offset = (last_phys_dir > 0) ? 0.0 : z_backlash_mm;
                     half_nut_state = ENGAGED;
                     half_nut_request_pending = false;
-                    emu_log_event("half-nut ENGAGED (phase match)");
+                    emu_log_event("half-nut ENGAGED (phase match, seated dz=%.4f, "
+                                  "lash wall %s)", dz,
+                                  (last_phys_dir > 0) ? "-" : "+");
                 }
             }
         } else {
@@ -192,7 +229,6 @@ void LathePhysics::tick(double dt, const void *shared_data) {
             z_jog_velocity = z_target_vel;
         }
         double z_step = z_jog_velocity * dt;
-        if (std::abs(z_step) > 1e-9) last_manual_dir = (z_step > 0) ? 1.0 : -1.0;
         carriage_mm += z_step;
         carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
     } else {
@@ -241,15 +277,22 @@ void LathePhysics::tick(double dt, const void *shared_data) {
 }
 
 void LathePhysics::onStepPulse(int direction) {
-    /* direction: +1 or -1, from DIR pin */
+    /* direction: +1 or -1, from DIR pin (set by the firmware's servoDir register).
+     * servo_sign models the PHYSICAL motor wiring: on a reverse-wired motor the
+     * same DIR pin drives the leadscrew the opposite physical way. This is
+     * independent of servoDir, which reflex-ui owns -- the operator's servo
+     * reverse toggle must cancel servo_sign for a commanded +move to go +. */
+    int phys_dir = direction * servo_sign;
     leadscrew_total_steps += direction;
-    leadscrew_position_mm += direction * leadscrew_mm_per_step;
+    leadscrew_position_mm += phys_dir * leadscrew_mm_per_step;
+    time_since_step_s = 0.0;  /* engagement gate: leadscrew is actively stepping */
+    last_phys_dir = phys_dir; /* sets the lash wall on a moving (phase-match) engage */
 
     if (half_nut_state == ENGAGED) {
         /* Faithful (non-lossy) backlash model: track nut position within play window
          * [0, z_backlash_mm]. Carriage only moves when nut hits a wall and pushes.
          * Partial reversals only consume the actual traversal distance. */
-        double move = direction * leadscrew_mm_per_step;
+        double move = phys_dir * leadscrew_mm_per_step;
         double new_offset = backlash_offset + move;
 
         if (new_offset > z_backlash_mm) {
@@ -284,10 +327,20 @@ int64_t LathePhysics::getSpindleEncoderCounts() const {
     /* Convert cumulative angle to encoder counts.
      * This wraps at 16-bit for TIM1 (which is how the real encoder works). */
     double counts = spindle_theta / (2.0 * M_PI) * spindle_counts_per_rev;
-    return (int64_t)counts;
+    return (int64_t)counts * spindle_scale_sign;
 }
 
 void LathePhysics::requestHalfNutToggle() {
+    /* A toggle while a moving engage is still waiting for phase alignment
+     * cancels it (operator releases the lever before it drops in). Written
+     * from the dashboard/serve thread while the ISR thread may transition
+     * ENGAGING->ENGAGED — same benign-race pattern as the pending flag. */
+    if (half_nut_state == ENGAGING) {
+        half_nut_state = DISENGAGED;
+        half_nut_request_pending = false;
+        emu_log_event("half-nut engage CANCELLED");
+        return;
+    }
     half_nut_request_pending = true;
 }
 
@@ -307,7 +360,7 @@ void LathePhysics::moveCarriageTo(double target_mm) {
 }
 
 int64_t LathePhysics::getCarriageEncoderCounts() const {
-    return (int64_t)(carriage_mm * z_counts_per_mm);
+    return (int64_t)(carriage_mm * z_counts_per_mm) * z_scale_sign;
 }
 
 void LathePhysics::jogCrossSlide(int direction) {
@@ -324,21 +377,15 @@ void LathePhysics::moveCrossSlideTo(double target_mm) {
 }
 
 int64_t LathePhysics::getCrossSlideEncoderCounts() const {
-    return (int64_t)(cross_slide_mm * x_counts_per_mm);
+    return (int64_t)(cross_slide_mm * x_counts_per_mm) * x_scale_sign;
 }
 
 /* --- Half-nut engagement helpers --- */
 
-double LathePhysics::getLeadscrewPhase() const {
-    /* Phase within one revolution of the leadscrew (0.0 to 1.0) */
-    double revolutions = leadscrew_position_mm / leadscrew_grid_spacing_mm;
-    double phase = fmod(revolutions, 1.0);
-    if (phase < 0.0) phase += 1.0;
-    return phase;
-}
-
 double LathePhysics::getCarriageGridPhase() const {
-    /* Where is the carriage relative to the leadscrew thread grid? */
+    /* Where is the carriage relative to the leadscrew thread grid?
+     * Lattice-relative: 0 (mod 1) means the carriage sits exactly on a
+     * thread-grid point for the current leadscrew position. */
     double grid = leadscrew_grid_spacing_mm;
     double offset = fmod(leadscrew_position_mm, grid);
     if (offset < 0.0) offset += grid;
@@ -348,24 +395,30 @@ double LathePhysics::getCarriageGridPhase() const {
     return phase;
 }
 
-void LathePhysics::snapCarriageToGrid() {
+double LathePhysics::nearestGridPositionMM(double target_mm) const {
     double grid = leadscrew_grid_spacing_mm;
     double offset = fmod(leadscrew_position_mm, grid);
     if (offset < 0.0) offset += grid;
+    return round((target_mm - offset) / grid) * grid + offset;
+}
+
+double LathePhysics::snapCarriageToGrid() {
     double before = carriage_mm;
-    carriage_mm = round((carriage_mm - offset) / grid) * grid + offset;
+    carriage_mm = nearestGridPositionMM(carriage_mm);
     carriage_mm = std::max(z_min_mm, std::min(z_max_mm, carriage_mm));
-    emu_log_event("SNAP before=%.4f after=%.4f grid=%.4f offset=%.4f lsPos=%.4f dZ=%.4f",
-                  before, carriage_mm, grid, offset, leadscrew_position_mm,
-                  carriage_mm - before);
+    double dz = carriage_mm - before;
+    emu_log_event("SNAP before=%.4f after=%.4f grid=%.4f lsPos=%.4f dZ=%.4f",
+                  before, carriage_mm, leadscrew_grid_spacing_mm,
+                  leadscrew_position_mm, dz);
+    return dz;
 }
 
 bool LathePhysics::checkPhaseAlignment() const {
-    double ls_phase = getLeadscrewPhase();
-    double carr_phase = getCarriageGridPhase();
-    double delta = std::abs(ls_phase - carr_phase);
-    if (delta > 0.5) delta = 1.0 - delta;  /* wrap around */
-
-    /* Tolerance: within ~2% of a revolution */
-    return delta < 0.02;
+    /* getCarriageGridPhase() is already lattice-relative, so aligned means
+     * the phase is within tolerance of an INTEGER. (Comparing it against the
+     * leadscrew phase again double-counted the offset: engagement fired at
+     * carriage ≡ 2·offset — twice per rev, at off-lattice positions.) */
+    double p = getCarriageGridPhase();
+    double d = std::abs(p - std::round(p));
+    return d < PHASE_TOL_FRAC;
 }

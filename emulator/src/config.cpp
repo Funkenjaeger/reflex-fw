@@ -41,6 +41,7 @@ EmuConfig::EmuConfig() {
     jog_max_velocity_mm_s = 10.0;
     jog_acceleration_mm_s2 = 50.0;
     x_up_is_negative = true;
+    x_scale_dir = 1;
     manual_move_timeout_s = 2.0;
 
     servo_max_speed = 720;
@@ -161,6 +162,7 @@ bool loadConfig(const std::string &path, EmuConfig &cfg) {
     cfg.jog_max_velocity_mm_s = getDouble("cross_slide.jog_max_velocity_mm_s", cfg.jog_max_velocity_mm_s);
     cfg.jog_acceleration_mm_s2 = getDouble("cross_slide.jog_acceleration_mm_s2", cfg.jog_acceleration_mm_s2);
     cfg.x_up_is_negative = getBool("cross_slide.x_up_is_negative", cfg.x_up_is_negative);
+    cfg.x_scale_dir = getInt("cross_slide.scale_dir", cfg.x_scale_dir);
     cfg.manual_move_timeout_s = getDouble("cross_slide.manual_move_timeout_s", cfg.manual_move_timeout_s);
 
     cfg.servo_max_speed = getDouble("servo.max_speed", cfg.servo_max_speed);

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <atomic>
 #include <cmath>
+#include <random>
 
 class LathePhysics {
 public:
@@ -61,6 +62,12 @@ public:
     double getLeadscrewPositionMM() const { return leadscrew_position_mm; }
     double getLeadscrewGridSpacingMM() const { return leadscrew_grid_spacing_mm; }
 
+    /* Nearest carriage position that sits exactly on the leadscrew thread
+     * lattice for the CURRENT leadscrew position. Not clamped to travel
+     * limits: a target within half a grid of z_min/z_max can end up clamped
+     * off-lattice by moveCarriageTo — acceptable edge case. */
+    double nearestGridPositionMM(double target_mm) const;
+
     /* Lash window position: 0 = on -wall, z_backlash_mm = on +wall. Used by the
      * ELS scenario to verify the takeup loads the correct (cutting-side) wall. */
     double getBacklashOffsetMM() const { return backlash_offset; }
@@ -81,6 +88,17 @@ private:
     double x_max_mm, x_min_mm;
     double x_manual_step_mm;
 
+    /* PHYSICAL wiring signs (+1/-1), independent of the firmware canonicalization
+     * registers (scaleDir/servoDir) that reflex-ui writes. These model how the
+     * real machine happens to be wired -- encoder cable orientation / motor
+     * wiring -- which the operator's UI reversing toggle must cancel. Applied in
+     * the encoder-count getters and onStepPulse; NOT the same as the Modbus
+     * scaleDir/servoDir registers (which the host overwrites on connect). */
+    int    spindle_scale_sign;
+    int    z_scale_sign;
+    int    x_scale_sign;
+    int    servo_sign;
+
     /* Spindle state */
     double spindle_theta;         /* cumulative angle in radians */
     double spindle_omega;         /* angular velocity in rad/s */
@@ -95,8 +113,18 @@ private:
     HalfNutState half_nut_state;
     bool   half_nut_request_pending;
     double backlash_offset;    /* nut position within play window: [0, z_backlash_mm] */
-    double last_manual_dir;    /* sign of last manual (disengaged) carriage move; sets the
-                                * lash wall the nut rests on when the half-nut re-engages */
+
+    /* Half-nut engagement gate: leadscrew activity is tracked from our own
+     * step pulses (onStepPulse), NOT from firmware ramp internals —
+     * servo.currentSpeed is the indexing/jog ramp variable and is pinned to 0
+     * during pure ELS sync. */
+    double time_since_step_s;  /* seconds since the last STEP pulse; large at boot */
+    int    last_phys_dir;      /* physical direction of the last step pulse (+1/-1, 0 = none yet) */
+
+    /* Drop-in position generator for stationary engagement: where within the
+     * lash window the nut lands is operator-arbitrary. Fixed default seed for
+     * reproducible runs; override with EMU_SEED. */
+    std::minstd_rand lash_rng;
 
     /* Cross-slide state */
     double cross_slide_mm;
@@ -120,10 +148,17 @@ private:
     static constexpr double JOG_KEY_TIMEOUT = 0.15; /* seconds of no key → stop */
 
     /* Half-nut engagement helpers */
-    double getLeadscrewPhase() const;
     double getCarriageGridPhase() const;
-    void   snapCarriageToGrid();
+    double snapCarriageToGrid();   /* returns signed carriage displacement (mm) */
     bool   checkPhaseAlignment() const;
+
+    /* Engagement tolerance as a fraction of the thread grid. Distinct from
+     * the (numerically similar) default z_backlash_mm and the serve-mode
+     * arrival tolerance in main.cpp — three unrelated 0.02s. */
+    static constexpr double PHASE_TOL_FRAC = 0.02;
+    /* "Leadscrew moving" = a step pulse within this window. Pulse rate below
+     * 10 Hz (≈1 RPM sync on the reference geometry) reads as stationary. */
+    static constexpr double STEP_ACTIVITY_WINDOW_S = 0.1;
 };
 
 #endif /* EMU_PHYSICS_H */

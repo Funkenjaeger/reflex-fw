@@ -296,9 +296,17 @@ static void runPhysicsServer(LathePhysics *physics, rampsHandler_t *rampsData,
     double homeMM = physics->getCarriageMM();
     if (const char *h = getenv("EMU_RETRACT_MM")) homeMM = atof(h);
 
-    printf("=== PHYSICS SERVER: rpm=%.1f homeMM=%.4f (reflex-ui drives ELS over Modbus) ===\n",
-           rpm, homeMM);
-    printf("    spindle running; manual half-nut retract on each ELS stop.\n");
+    // EMU_NO_AUTO_RETRACT: skip the simulated operator hand-retract on each ELS
+    // stop. Use this to test reflex-ui's OWN retract workflow (stop+retract /
+    // wizard modes), where the host drives the servo retract with the half-nut
+    // kept engaged. Default (unset) = simulate the manual retract (stop-only).
+    bool noAutoRetract = getenv("EMU_NO_AUTO_RETRACT") != nullptr;
+
+    printf("=== PHYSICS SERVER: rpm=%.1f homeMM=%.4f auto_retract=%d (reflex-ui drives ELS over Modbus) ===\n",
+           rpm, homeMM, (int)!noAutoRetract);
+    printf("    spindle running; %s on each ELS stop.\n",
+           noAutoRetract ? "host-driven retract (no auto-retract)"
+                         : "manual half-nut retract");
     fflush(stdout);
 
     uint32_t prevSeq = emu_hw.els_last_stop_seq;
@@ -317,13 +325,30 @@ static void runPhysicsServer(LathePhysics *physics, rampsHandler_t *rampsData,
 
         // Let the host observe active=1 and settle its FSM into 'stopped'.
         ms(400);
+
+        if (noAutoRetract) {
+            // Host (reflex-ui) drives the retract via the servo with the
+            // half-nut kept engaged; the emulator does nothing but log.
+            printf("  [stop #%u] host-driven retract; half-nut left engaged\n",
+                   (unsigned)seq);
+            fflush(stdout);
+            continue;
+        }
+
         // Manual retract: open half-nut, hand-move carriage home, re-engage.
+        // Park on a lattice-aligned position so the re-engage snap is a no-op
+        // and legacy stationary re-engagements stay deterministic. Computed
+        // per stop: the lattice offset shifts every pass (takeup/correction
+        // move the leadscrew), but it is frozen between the stop trigger and
+        // re-engage (sync is gated while active=1, released by the host only
+        // after we re-engage).
         physics->requestHalfNutToggle();
         ms(80);
-        physics->moveCarriageTo(homeMM);
+        double alignedHome = physics->nearestGridPositionMM(homeMM);
+        physics->moveCarriageTo(alignedHome);
         int guard = 0;
         while ((physics->isZMoveTargetActive()
-                || std::abs(physics->getCarriageMM() - homeMM) > 0.02)
+                || std::abs(physics->getCarriageMM() - alignedHome) > 0.02)
                && g_running.load() && guard < 8000) { ms(2); guard++; }
         ms(120);
         physics->requestHalfNutToggle();
@@ -475,10 +500,16 @@ int main(int argc, char *argv[]) {
     RampsStart(&rampsData);
     printf("Firmware initialized.\n");
 
-    /* Apply direction config after RampsStart defaults */
-    rampsData.shared.scales[0].scaleDir = (int16_t)cfg.spindle_scale_dir;
-    rampsData.shared.scales[1].scaleDir = (int16_t)cfg.z_scale_dir;
-    rampsData.shared.servo.servoDir = (int16_t)cfg.servo_dir;
+    /* NOTE: the scaleDir/servoDir REGISTERS keep their canonical +1 firmware
+     * defaults (RampsStart) here. They represent the HOST's (reflex-ui's)
+     * direction canonicalization, which the UI writes on connect from its
+     * Reverse toggles. The `*_scale_dir`/`servo_dir` config keys instead drive
+     * the PHYSICAL wiring signs in the physics model (see physics.cpp) — the
+     * thing those toggles must cancel. Preloading the registers from the same
+     * config double-applied the sign (self-cancelling in dashboard mode), so we
+     * no longer do it. In dashboard/standalone mode (no host) an inverted wiring
+     * therefore shows as an inverted DRO — the honest uncommissioned-machine view.
+     */
 
     /* Initialize servoCycles to avoid division by zero on first ISR tick.
      * On real hardware updateSpeedTask() sets this within 50ms of boot,

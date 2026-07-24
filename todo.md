@@ -76,6 +76,16 @@ instead of leaving bare `TODO:` comments in code.
 
 ---
 
+## Emulator
+
+### Dashboard: show the real backlash offset
+- `emulator/src/dashboard.cpp` Z-axis status line prints a hardcoded
+  `backlash: 0.0` (`toDisplay(0.0)`) instead of the physics model's actual nut
+  position. Wire it to `physics.getBacklashOffsetMM()` so lash-wall state is
+  visible when eyeballing half-nut engagement / takeup behavior.
+
+---
+
 ## Hardware workarounds (remove when HW is fixed)
 
 ### STEP duplicated on SPARE_2 (PA3) — PCB wiring workaround
