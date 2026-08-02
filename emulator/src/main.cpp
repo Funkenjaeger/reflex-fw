@@ -12,6 +12,9 @@
 #include <atomic>
 #include <csignal>
 #include <cmath>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 #include "config.h"
 #include "physics.h"
@@ -275,6 +278,57 @@ static void runElsScenario(LathePhysics *physics, rampsHandler_t *rampsData,
  * Retract home: the carriage position at startup (the host must place stop_z on
  * the cutting side of it). Override the retract distance via EMU_RETRACT_MM.
  */
+/*
+ * Serve-mode stdin command channel: gives system tests a way to move the
+ * X (cross-slide) axis mid-test without a new Modbus register. One command
+ * per line, whitespace-separated:
+ *
+ *   x move <mm>        -> physics->moveCrossSlideTo(mm)
+ *   x jog <-1|0|1>      -> physics->jogCrossSlide(dir)
+ *
+ * Runs on its own thread (same pattern as isrThreadFunc) because
+ * runPhysicsServer's loop can block for several seconds inside the
+ * auto-retract and must never be the thing blocked on stdin. Unknown or
+ * malformed lines are logged and skipped; EOF quietly ends the thread. The
+ * thread is started detached, so it is never joined -- fine, since it makes
+ * no further use of *physics after returning.
+ */
+static void stdinCommandThreadFunc(LathePhysics *physics) {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream iss(line);
+        std::string axis, verb;
+        iss >> axis >> verb;
+
+        if (axis != "x") {
+            emu_log_event("stdin cmd: unknown axis '%s' (line: \"%s\")",
+                          axis.c_str(), line.c_str());
+            continue;
+        }
+
+        if (verb == "move") {
+            double mm;
+            if (iss >> mm) {
+                physics->moveCrossSlideTo(mm);
+                emu_log_event("stdin cmd: x move %.4f", mm);
+            } else {
+                emu_log_event("stdin cmd: malformed 'x move' (line: \"%s\")", line.c_str());
+            }
+        } else if (verb == "jog") {
+            int dir;
+            if ((iss >> dir) && (dir == -1 || dir == 0 || dir == 1)) {
+                physics->jogCrossSlide(dir);
+                emu_log_event("stdin cmd: x jog %d", dir);
+            } else {
+                emu_log_event("stdin cmd: malformed 'x jog' (line: \"%s\")", line.c_str());
+            }
+        } else {
+            emu_log_event("stdin cmd: unknown verb '%s' (line: \"%s\")", verb.c_str(), line.c_str());
+        }
+    }
+    emu_log_event("stdin cmd: EOF, command channel closed");
+}
+
 static void runPhysicsServer(LathePhysics *physics, rampsHandler_t *rampsData,
                              const EmuConfig &cfg) {
     using namespace std::chrono;
@@ -308,6 +362,11 @@ static void runPhysicsServer(LathePhysics *physics, rampsHandler_t *rampsData,
            noAutoRetract ? "host-driven retract (no auto-retract)"
                          : "manual half-nut retract");
     fflush(stdout);
+
+    // X-axis command channel: system tests write "x move <mm>" / "x jog <dir>"
+    // lines to our stdin. Own thread so this loop's occasional multi-second
+    // blocking (auto-retract, below) never stalls command delivery.
+    std::thread(stdinCommandThreadFunc, physics).detach();
 
     uint32_t prevSeq = emu_hw.els_last_stop_seq;
     while (g_running.load()) {
