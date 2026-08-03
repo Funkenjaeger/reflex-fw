@@ -87,3 +87,13 @@ add_executable(els_halfnut_test ${CMAKE_SOURCE_DIR}/test/els_halfnut_test.cpp
     ${CMAKE_SOURCE_DIR}/src/config.cpp)
 target_link_libraries(els_halfnut_test m)
 add_test(NAME els_halfnut_test COMMAND els_halfnut_test)
+
+# First-tick boot-delta int16 wrap guard: exercises LathePhysics directly
+# (same link shape as els_halfnut_test) and replays Ramps.c's own per-tick
+# int16-cast-and-accumulate DRO logic against it, so it proves the guard
+# without linking Ramps.c/Modbus.c or the Modbus register map.
+add_executable(els_boot_delta_test ${CMAKE_SOURCE_DIR}/test/els_boot_delta_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/physics.cpp
+    ${CMAKE_SOURCE_DIR}/src/config.cpp)
+target_link_libraries(els_boot_delta_test m)
+add_test(NAME els_boot_delta_test COMMAND els_boot_delta_test)

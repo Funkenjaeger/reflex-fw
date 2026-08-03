@@ -129,6 +129,29 @@ private:
     /* Cross-slide state */
     double cross_slide_mm;
 
+    /* Exposed (to the firmware's emulated timer-counter registers) Z/X
+     * encoder counts. Ramp toward getCarriageEncoderCounts()/
+     * getCrossSlideEncoderCounts() by at most MAX_EXPOSED_STEP_COUNTS per
+     * tick instead of jumping straight there. Needed because
+     * z_initial_mm/x_initial_mm pre-seed carriage_mm/cross_slide_mm to a
+     * nonzero value before the very first tick, so the raw encoder count is
+     * already large on tick 1 -- while the firmware's own DRO tracking
+     * (Ramps.c's scalesDeltaPos oldPosition/position) starts at zero. A
+     * single-tick exposure of that gap overflows Ramps.c:387-390's
+     * `(int16_t)(position - oldPosition)` cast once the offset exceeds
+     * 32767 counts (81.9175mm at 400 counts/mm) -- see els_boot_delta_test.
+     * Real hardware never pre-seeds a timer counter (no
+     * TIM_SetCounter/__HAL_TIM_SET_COUNTER in Core/Src), so this ramp is
+     * emulator-only and invisible to any codepath hardware exercises: once
+     * caught up (a handful of 100us ticks after boot), z_exposed_counts ==
+     * the true count every tick, identical to the un-ramped code, and the
+     * clamp (4000 counts/tick = 10mm/tick at 400 counts/mm, vs. a realistic
+     * per-tick jog delta of well under 1 count at 10 mm/s / 10kHz) never
+     * engages during normal motion. */
+    int64_t z_exposed_counts;
+    int64_t x_exposed_counts;
+    static constexpr int64_t MAX_EXPOSED_STEP_COUNTS = 4000;
+
     /* Manual jog state (velocity-based with acceleration) */
     double z_jog_velocity;       /* current mm/s */
     double z_jog_target_dir;     /* -1, 0, or +1 (arrow key jog) */

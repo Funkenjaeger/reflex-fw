@@ -57,6 +57,14 @@ LathePhysics::LathePhysics(const EmuConfig &cfg) {
 
     cross_slide_mm = cfg.x_initial_mm;
 
+    /* Exposed encoder counts start at 0 to match the firmware's own
+     * zero-initialized DRO tracking (rampsHandler_t is memset(0) at boot on
+     * both the emulator and real hardware) -- NOT at the pre-seeded
+     * carriage_mm/cross_slide_mm. tick() ramps these toward the true
+     * physics position; see the field comments in physics.h. */
+    z_exposed_counts = 0;
+    x_exposed_counts = 0;
+
     z_jog_velocity = 0.0;
     z_jog_target_dir = 0.0;
     z_move_active = false;
@@ -266,10 +274,26 @@ void LathePhysics::tick(double dt, const void *shared_data) {
         cross_slide_mm = std::max(x_min_mm, std::min(x_max_mm, cross_slide_mm));
     }
 
-    /* --- Update encoder counters for firmware --- */
+    /* --- Update encoder counters for firmware ---
+     * Z/X ramp toward the true physics position (see physics.h) so a
+     * pre-seeded initial offset can never produce a first-tick delta big
+     * enough to overflow Ramps.c's int16 cast. Spindle has no equivalent
+     * initial-offset config (spindle_theta always starts at 0.0), so it is
+     * exposed directly as before. */
     emu_hw.scale_counters[0] = (uint32_t)(int32_t)getSpindleEncoderCounts();
-    emu_hw.scale_counters[1] = (uint32_t)(int32_t)getCarriageEncoderCounts();
-    emu_hw.scale_counters[2] = (uint32_t)(int32_t)getCrossSlideEncoderCounts();
+
+    int64_t z_target = getCarriageEncoderCounts();
+    int64_t z_delta = z_target - z_exposed_counts;
+    z_delta = std::max(-MAX_EXPOSED_STEP_COUNTS, std::min(MAX_EXPOSED_STEP_COUNTS, z_delta));
+    z_exposed_counts += z_delta;
+    emu_hw.scale_counters[1] = (uint32_t)(int32_t)z_exposed_counts;
+
+    int64_t x_target = getCrossSlideEncoderCounts();
+    int64_t x_delta = x_target - x_exposed_counts;
+    x_delta = std::max(-MAX_EXPOSED_STEP_COUNTS, std::min(MAX_EXPOSED_STEP_COUNTS, x_delta));
+    x_exposed_counts += x_delta;
+    emu_hw.scale_counters[2] = (uint32_t)(int32_t)x_exposed_counts;
+
     emu_hw.scale_counters[3] = 0;
 
     /* Write into the TIM counter registers */
