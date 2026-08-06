@@ -97,3 +97,19 @@ add_executable(els_boot_delta_test ${CMAKE_SOURCE_DIR}/test/els_boot_delta_test.
     ${CMAKE_SOURCE_DIR}/src/config.cpp)
 target_link_libraries(els_boot_delta_test m)
 add_test(NAME els_boot_delta_test COMMAND els_boot_delta_test)
+
+# KNOWN-FAILING REPRODUCTION: ELS stop resume re-latch defect.
+# Drives the REAL Core/Src/Ramps.c ISR (SynchroRefreshTimerIsr) directly; the
+# test file stubs every Ramps.c external (HAL GPIO/TIM, Modbus, CMSIS-RTOS,
+# emu_hw/emu_log_trace/emu_dwt), so neither hal_shim.c nor Modbus.c is linked.
+# Contains a defect case (resume without retracting) that FAILS on purpose and
+# a control case (resume after retracting) that passes -- the pair is what
+# distinguishes a real defect from a broken test. Expect this target RED until
+# the resume path is fixed.
+add_executable(els_stop_resume_relatch_test
+    ${CMAKE_SOURCE_DIR}/test/els_stop_resume_relatch_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_stop_resume_relatch_test m pthread)
+add_test(NAME els_stop_resume_relatch_test COMMAND els_stop_resume_relatch_test)

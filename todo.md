@@ -76,6 +76,29 @@ instead of leaving bare `TODO:` comments in code.
 
 ---
 
+## ELS shoulder stop
+
+### Resume is silently skipped when the carriage hasn't retracted (KNOWN FAILING TEST)
+- **Reproduction:** `emulator/test/els_stop_resume_relatch_test.cpp`, CTest target
+  `els_stop_resume_relatch_test`. It is RED on purpose; 2 assertions fail. The
+  same file contains passing controls, so a green run would mean the bug is fixed.
+- If SW resumes by writing `elsStop.active = 0` while the reference axis is still
+  at/past `elsStop.stopPosition`, the trigger test at `Core/Src/Ramps.c:403` (inside
+  the per-scale loop, so EARLIER in the pass) re-latches `active = 1` before the
+  1→0 edge test at `Core/Src/Ramps.c:455` runs. The edge is consumed within the
+  pass, so the backlash takeup and `applyPhaseCorrection` are both silently
+  skipped — `takeupPending` never sets and `stepsToGo` never moves. The machine
+  just looks like it re-stopped.
+- `elsStop.hysteresis` (`Core/Inc/Ramps.h:102`, documented "encoder counts carriage
+  must retract before re-enabling") is declared and **never read anywhere in the
+  firmware** — one repo-wide hit, the declaration itself. Wiring it into the
+  Ramps.c:403 trigger test is the obvious fix, but it needs a decision on whether
+  the retract is measured from `stopPosition` or from `latchedZ`, and on what a
+  0 (documented "no hysteresis") should do about the re-latch race.
+- Fix is deliberately NOT applied — logged for a decision first.
+
+---
+
 ## Emulator
 
 ### Dashboard: show the real backlash offset
