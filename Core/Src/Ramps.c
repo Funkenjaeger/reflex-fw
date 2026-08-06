@@ -510,7 +510,19 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
     data->servoPreviousDirection = direction;
   }
 
-  servoCyclesCounter = (servoCyclesCounter + 1) % servoCycles;
+  /* Divide-by-zero guard. The zero window is REACHABLE, not theoretical:
+   * servoCycles is 0 from reset (Ramps.c:64) and its only writer is
+   * updateSpeedTask (Ramps.c:601), but RampsStart() enables the 100 kHz TIM9
+   * interrupt as its last act (HAL_TIM_Base_Start_IT, Ramps.c:165) and main.c
+   * only reaches osKernelStart() afterwards, so this ISR runs before the
+   * scheduler exists at all, and updateSpeedTask then sleeps osDelay(50) before
+   * its first assignment. That is >5000 ISR ticks at 10 us with servoCycles == 0.
+   * It goes unnoticed on hardware because Cortex-M4 UDIV-by-zero yields 0 with
+   * DIV_0_TRP clear (never set here) and servoMode is still 0 so no pulses are
+   * emitted; it is still C undefined behavior, and the emulator's x86 build
+   * takes SIGFPE on this line. Substituting 0 reproduces the observed hardware
+   * result without the UB. Nonzero servoCycles behaves exactly as before. */
+  servoCyclesCounter = (servoCycles != 0) ? (servoCyclesCounter + 1) % servoCycles : 0;
 
 #ifdef EMULATOR_BUILD
   /* Step_6 per-tick trace: flutter detection + periodic sample. End-of-tick
