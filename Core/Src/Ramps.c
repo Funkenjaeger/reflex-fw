@@ -402,11 +402,26 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
       // Check ELS stop trigger (only latch when not already active)
       if (!shared->elsStop.active && shared->elsStop.enable) {
         int32_t refPos = shared->scales[shared->elsStop.scaleIndex].position;
-        bool shouldStop = (shared->elsStop.stopDirection >= 0)
+        /* Hysteresis gate (elsStop.hysteresis, Ramps.h:102). Distance the axis
+         * currently sits CLEAR of the threshold, on the retract side. The flag
+         * is sticky-true until the next latch, so a resume issued with the axis
+         * still at/past the threshold cannot re-latch in the same ISR pass and
+         * swallow the 1->0 edge the resume path (Ramps.c:455) depends on.
+         * hysteresis <= 0 sets the flag unconditionally every pass, which is
+         * exactly the pre-gate behavior. */
+        int32_t clearance = (shared->elsStop.stopDirection >= 0)
+                            ? (shared->elsStop.stopPosition - refPos)
+                            : (refPos - shared->elsStop.stopPosition);
+        if (shared->elsStop.hysteresis <= 0 || clearance >= shared->elsStop.hysteresis) {
+          data->elsStopHysteresisCleared = 1;
+        }
+        bool shouldStop = ((shared->elsStop.stopDirection >= 0)
                           ? (refPos >= shared->elsStop.stopPosition)
-                          : (refPos <= shared->elsStop.stopPosition);
+                          : (refPos <= shared->elsStop.stopPosition))
+                          && data->elsStopHysteresisCleared;
         if (shouldStop) {
           shared->elsStop.active = 1;
+          data->elsStopHysteresisCleared = 0;
           if (!shared->elsStop.referenceLatched) {
             shared->elsStop.latchedZ         = shared->scales[shared->elsStop.scaleIndex].position;
             shared->elsStop.latchedSpindle   = shared->scales[0].position;
