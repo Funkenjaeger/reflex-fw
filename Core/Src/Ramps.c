@@ -512,7 +512,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
 
   /* Divide-by-zero guard. The zero window is REACHABLE, not theoretical:
    * servoCycles is 0 from reset (Ramps.c:64) and its only writer is
-   * updateSpeedTask (Ramps.c:601), but RampsStart() enables the 100 kHz TIM9
+   * updateSpeedTask (Ramps.c:613), but RampsStart() enables the 100 kHz TIM9
    * interrupt as its last act (HAL_TIM_Base_Start_IT, Ramps.c:165) and main.c
    * only reaches osKernelStart() afterwards, so this ISR runs before the
    * scheduler exists at all, and updateSpeedTask then sleeps osDelay(50) before
@@ -521,7 +521,11 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
    * DIV_0_TRP clear (never set here) and servoMode is still 0 so no pulses are
    * emitted; it is still C undefined behavior, and the emulator's x86 build
    * takes SIGFPE on this line. Substituting 0 reproduces the observed hardware
-   * result without the UB. Nonzero servoCycles behaves exactly as before. */
+   * result without the UB. Nonzero servoCycles behaves exactly as before.
+   * COUPLED WITH updateSpeedTask's newPeriod clamp (Ramps.c:610-613): that
+   * clamp now floors at 1, not 0, so the boot window above is the only
+   * remaining source of servoCycles == 0. This guard must stay regardless —
+   * it is what makes that window survivable. */
   servoCyclesCounter = (servoCycles != 0) ? (servoCyclesCounter + 1) % servoCycles : 0;
 
 #ifdef EMULATOR_BUILD
@@ -608,7 +612,12 @@ _Noreturn void updateSpeedTask(void *argument) {
       newPeriod = 65535;
     }
     if (newPeriod < 1) {
-      newPeriod = 0;
+      // Never clamp to 0: a period of 0 has no meaningful semantics (it
+      // would encode "too fast to subdivide" as an impossible state), and
+      // the only thing that makes a zero survivable is the ISR divide-by-
+      // zero guard at Ramps.c:513. Floor at 1 (the fastest representable
+      // subdivision) so this writer stops relying on that guard.
+      newPeriod = 1;
     }
     servoCycles = (uint16_t) newPeriod;
 
