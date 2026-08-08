@@ -41,6 +41,30 @@
  * way in is servoMode != 1, where stepsToGo is never consumed at all. */
 #define ELS_TAKEUP_TIMEOUT_TICKS 500000
 
+/* How long the Z confirmation gate keeps LOOKING after the commanded take-up
+ * motion has finished, before latching its verdict. ISR is ~100 kHz, so this is
+ * ~250 ms.
+ *
+ * Neither extreme is safe. Re-evaluating FOREVER (the original behaviour) means
+ * a withheld take-up is satisfied by the first Z motion from ANY source — on
+ * hardware 2026-08-08 an operator nudging the carriage by hand, with the
+ * half-nut open, released a correctly-withheld gate. But latching the instant
+ * the move completes assumes the carriage stops dead when the servo does, and
+ * it does not: there is real inertia and drivetrain compliance.
+ *
+ * Note the existing ELS_SETTLE_TICKS evidence does NOT cover this. That 1 s
+ * dwell was tried when a take-up was fully absorbed by lash and moved the
+ * carriage not at all, so there was nothing to settle. A take-up sized at
+ * measured + margin deliberately DOES move the carriage, which is a different
+ * regime and newer than that experiment.
+ *
+ * 250 ms sits well above any plausible mechanical settle at these speeds
+ * (sub-millimetre moves, heavy carriage, high friction) and well below the time
+ * it takes a person to reach a handwheel. It bounds the exposure; it does not
+ * eliminate it — only correlating Z motion against commanded steps does that,
+ * and that is the real fix (see todo.md). */
+#define ELS_TAKEUP_CONFIRM_WINDOW_TICKS 25000
+
 #ifdef EMULATOR_BUILD
 #include "emulator_state.h"
 
@@ -489,6 +513,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
     shared->elsStop.takeupPending = 0;
     data->elsStopSettleCount      = 0;
     data->elsStopTakeupTicks      = 0;
+    data->elsStopTakeupLatched    = 0;
   }
 
   data->elsStopPreviousEnable = shared->elsStop.enable;
@@ -581,6 +606,40 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
            * count of OUTCOMES rather than a tick counter. */
           shared->elsStop.takeupResult = ELS_TAKEUP_ERR_UNCONFIRMED;
           shared->elsStop.takeupSeq++;
+        }
+
+        /* Close the window once late motion has had its chance, then ABORT THE
+         * PASS back to the stopped state rather than holding the machine.
+         *
+         * Holding takeupPending forever was worse than useless: sync stayed
+         * gated with no way out but the enable 1->0 escape hatch, and that hatch
+         * clears referenceLatched on the next 0->1 edge — so recovering from a
+         * FALSE alarm cost the operator their thread phase reference. The
+         * remedy was more expensive than the fault.
+         *
+         * Aborting to active = 1 returns the machine to exactly where it was
+         * before the operator pressed Cut: stopped at the shoulder, reference
+         * intact, sync gated because we are stopped rather than because we are
+         * stuck. The operator closes the half-nut and presses Cut again. Nothing
+         * to reset, nothing lost.
+         *
+         * takeupResult stays UNCONFIRMED so the UI can say why, and is cleared
+         * at the next take-up initiation, which makes the warning self-clearing
+         * on retry. */
+        if (!data->elsStopTakeupLatched) {
+          if (data->elsStopSettleCount
+              < (ELS_SETTLE_TICKS + ELS_TAKEUP_CONFIRM_WINDOW_TICKS)) {
+            data->elsStopSettleCount++;
+          } else {
+            data->elsStopTakeupLatched    = 1;
+            shared->elsStop.takeupPending = 0;   /* stop holding the machine */
+            shared->elsStop.active        = 1;   /* back to stopped-at-shoulder */
+            shared->servo.stepsToGo       = 0;
+            shared->servo.currentSpeed    = 0;
+            data->elsStopSettleCount      = 0;
+            data->elsStopTakeupTicks      = 0;
+            /* referenceLatched deliberately untouched: a retry must be free. */
+          }
         }
       }
     } else if (data->elsStopTakeupTicks > ELS_TAKEUP_TIMEOUT_TICKS
@@ -717,6 +776,7 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
          * any pulses are issued, so the gate measures the whole takeup. */
         data->elsStopTakeupZStart      = shared->scales[shared->elsStop.scaleIndex].position;
         data->elsStopTakeupTicks       = 0;
+        data->elsStopTakeupLatched     = 0;
         shared->elsStop.takeupResult   = ELS_CAL_OK;
         /* Direction the Z scale should count in for this takeup. droSign is
          * els_phase.h's quantity — how a cutting-direction servo move changes the

@@ -213,6 +213,15 @@ struct Rig {
         lash.nutPos = lash.lashSteps;
     }
 
+    /* Move the carriage WITHOUT the servo driving it — an operator pushing it
+     * with the half-nut open. This is the degree of freedom the production
+     * emulator still lacks (see reflex-fw todo.md), and its absence is why the
+     * hardware defect below was unreachable by test: the model could express
+     * "coupled" and "never moves", but not "moving for a reason that isn't us". */
+    void nudgeCarriage(int32_t zCounts) {
+        zBase += zCounts;
+    }
+
     void stepDriven() {
         spindleCnt += SPINDLE_PER_PASS;
         zCnt = lash.follow((int32_t)data.shared.servo.currentSteps, zBase);
@@ -295,8 +304,6 @@ int main() {
 
         for (int i = 0; i < 60000; i++) rig.stepDriven();
 
-        checkEq(rig.data.shared.elsStop.takeupPending, 1,
-                "take-up STILL PENDING - sync stays gated");
         checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
                 "takeupResult reports UNCONFIRMED");
         check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
@@ -304,11 +311,15 @@ int main() {
         checkEq(rig.data.shared.elsStop.takeupSeq, 1,
                 "takeupSeq reported the outcome ONCE, not once per tick");
 
-        /* Escape hatch: without it, failing closed would be unrecoverable. */
-        rig.data.shared.elsStop.enable = 0;
-        rig.stepDriven();
-        checkEq(rig.data.shared.elsStop.takeupPending, 0,
-                "enable 1->0 releases the withheld take-up");
+        /* The pass ABORTS back to the stopped state once the confirmation
+         * window closes. Holding the machine was the earlier behaviour and it
+         * was worse than useless: the only way out was the enable toggle, which
+         * clears referenceLatched on re-engage — so recovering from a FALSE
+         * alarm cost the operator their thread phase reference. */
+        checkEq(rig.data.shared.elsStop.takeupPending, 0, "not holding the machine");
+        checkEq(rig.data.shared.elsStop.active, 1, "back to stopped-at-shoulder");
+        checkEq(rig.data.shared.elsStop.referenceLatched, 1,
+                "phase reference preserved: retry is free");
     }
 
     /* ---------------- Partial engagement: moves, but not enough ------ */
@@ -350,7 +361,9 @@ int main() {
               "carriage DID move, and would have cleared the bare 2-count floor");
         check(rig.data.shared.elsStop.lastTakeupZDelta < 11,
               "...but moved less than a calibrated take-up should");
-        checkEq(rig.data.shared.elsStop.takeupPending, 1, "WITHHELD");
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "REFUSED - moved less than a calibrated take-up should");
+        checkEq(rig.data.shared.elsStop.active, 1, "aborted back to stopped");
         check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
               "no phase correction on a partially engaged take-up");
     }
@@ -404,6 +417,76 @@ int main() {
                 "CONFIRMED - excess motion is not a fault (lower bound, not a window)");
     }
 
+    /* ---------------- The confirmation WINDOW ------------------------ */
+    /* Regression pair for the 2026-08-08 hardware finding: a correctly withheld
+     * take-up was released by the operator nudging the carriage by hand with the
+     * half-nut open, because the gate re-evaluated forever against the original
+     * baseline and accepted Z motion from any source at any time.
+     *
+     * The fix is a bounded window, not an instant latch — the carriage does not
+     * stop dead when the servo does, so genuinely late motion must still count. */
+    printf("\n-- late motion INSIDE the window still confirms (inertia/compliance) --\n");
+    {
+        Rig rig;
+        rig.init(90, 2, /*coupled*/ false, 60);   /* nut open: no driven motion */
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+
+        /* Run until the gate has evaluated and withheld. */
+        for (int i = 0; i < 60000
+             && rig.data.shared.elsStop.takeupResult != ELS_TAKEUP_ERR_UNCONFIRMED; i++)
+            rig.stepDriven();
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "withheld first");
+        check(rig.data.elsStopTakeupLatched == 0, "window still open at this point");
+
+        rig.nudgeCarriage(20);          /* well past the threshold */
+        /* Several ticks: the gate runs near the TOP of the ISR and the scale
+         * positions are refreshed further down, so it sees the previous tick's
+         * Z. One tick is not enough for injected motion to become visible. */
+        for (int i = 0; i < 5; i++) rig.stepDriven();
+        checkEq(rig.data.shared.elsStop.takeupPending, 0,
+                "motion arriving while the window is open CONFIRMS");
+    }
+
+    printf("\n-- late motion AFTER the window does NOT confirm (the HW defect) --\n");
+    {
+        /* MUTATION: remove the elsStopTakeupLatched guard (i.e. re-evaluate
+         * forever, the original behaviour) and this test goes green while the
+         * machine goes back to accepting a hand-pushed carriage as proof the
+         * half-nut is engaged. */
+        Rig rig;
+        rig.init(90, 2, /*coupled*/ false, 60);
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+
+        /* Run well past ELS_SETTLE_TICKS + ELS_TAKEUP_CONFIRM_WINDOW_TICKS. */
+        for (int i = 0; i < 40000; i++) rig.stepDriven();
+        checkEq(rig.data.elsStopTakeupLatched, 1, "window has closed");
+
+        /* The pass is ABORTED back to the stopped state, not held. */
+        checkEq(rig.data.shared.elsStop.takeupPending, 0, "no longer holding the machine");
+        checkEq(rig.data.shared.elsStop.active, 1, "back to stopped-at-shoulder");
+        checkEq(rig.data.shared.elsStop.referenceLatched, 1,
+                "thread phase reference PRESERVED - a retry must be free");
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "and it still says why");
+
+        rig.nudgeCarriage(200);         /* a big shove, far past any threshold */
+        for (int i = 0; i < 200; i++) rig.stepDriven();
+        check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
+              "a hand-pushed carriage never triggers the phase correction");
+
+        /* Retry: pressing Cut again clears the warning and starts a fresh
+         * take-up, with no reset ritual in between. */
+        rig.data.shared.elsStop.active = 0;
+        rig.stepDriven();
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_CAL_OK,
+                "the warning self-clears when the next cut is initiated");
+    }
+
     /* ---------------- Unconfigured threshold fails closed ------------ */
     printf("\n-- unconfigured motion threshold (0) on a HEALTHY machine --\n");
     {
@@ -416,8 +499,9 @@ int main() {
         rig.beginLashDriven();
         for (int i = 0; i < 60000; i++) rig.stepDriven();
 
-        checkEq(rig.data.shared.elsStop.takeupPending, 1,
-                "healthy machine + threshold 0 is WITHHELD (fails closed)");
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "healthy machine + threshold 0 is REFUSED (fails closed)");
+        checkEq(rig.data.shared.elsStop.active, 1, "aborted back to stopped");
         check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
               "no phase correction on an unconfirmed take-up");
     }
