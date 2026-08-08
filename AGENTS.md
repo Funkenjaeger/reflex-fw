@@ -1,5 +1,41 @@
 # AGENTS.md — Reflex Firmware
 
+## Branching and Hardware Verification — READ FIRST
+
+**This project drives a real lathe. The only complete test is on hardware, and
+Evan runs that, not on demand.** The emulator and the test suite are good and
+getting better, but they have repeatedly looked green while something real was
+wrong — no servo dynamics, no Modbus timing, no metal. Emulator green is
+evidence, never verification.
+
+**Do NOT commit directly to `dev-staging`.** It is one step from a dev release
+and everything on it is supposed to be hardware-verified.
+
+- Work on a **feature branch**, or on **`integration`** when several changes are
+  in flight and separate branches would just be overhead.
+- `integration` / feature branch → `dev-staging` is merged **only after Evan has
+  verified on hardware**. He does that merge, or explicitly asks for it.
+- `dev-staging` → `dev` and `dev` → `main` are **Evan's alone**. Never do these.
+
+**The one exception**, for changes that cannot affect machine behaviour and so
+need no hardware run: documentation, comments, `todo.md`, tests, and
+emulator-only code. Anything touching `Core/` is NOT clerical, however small it
+looks or however well tested — `Core/Src/Ramps.c` is the ISR that moves the
+machine.
+
+If unsure whether a change qualifies, it does not. Put it on a branch and ask.
+
+**Never push without being asked.** `origin` fans out to BOTH
+`github.com/Funkenjaeger/reflex-fw` and `dserver:/mnt/git/reflex-fw.git`, so any
+push writes two remotes at once. Note also that git only *fetches* from GitHub,
+so there is no tracking ref for dserver and `--force-with-lease` cannot protect
+it — a force-push needs an explicit
+`--force-with-lease=<branch>:<expected-sha>` aimed at the dserver URL directly,
+or it fails with "stale info" after GitHub has already moved.
+
+Record hardware-verification points in `todo.md` so the next session knows what
+has actually been proven on metal. Last verified: **2026-08-03 ~20:00**.
+
 ## Todo Tracking
 
 When you encounter a task, follow-up item, or piece of work that should be tracked, add it to `todo.md` in the project root. This applies to:
