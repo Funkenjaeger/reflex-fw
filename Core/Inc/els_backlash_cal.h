@@ -20,10 +20,32 @@
  * "Z must move backlashSteps worth of counts" is WRONG and wrong in the unsafe
  * direction — it would refuse every correctly configured take-up. The whole
  * purpose of the take-up is to drive the leadscrew ACROSS the lash window, and
- * motion spent inside that window moves the nut, not the carriage. A CORRECT
- * take-up may move the carriage barely at all; that is what absorbing lash
- * means. So "carriage didn't move" cannot by itself distinguish a good take-up
- * from an open half-nut.
+ * motion spent inside that window moves the nut, not the carriage.
+ *
+ * So for a take-up sized AT OR BELOW the true lash, the carriage may not move
+ * at all, and "carriage didn't move" cannot then distinguish a good take-up
+ * from an open half-nut. That is the regime the OLD open-loop take-up lived in
+ * — backlashSteps hand-entered against an unknown lash — and it is why the
+ * naive predicate above fails.
+ *
+ * READ THE NEXT PARAGRAPH BEFORE QUOTING THE ONE ABOVE. That is NOT the regime
+ * this module creates. Once calibrated, the commanded take-up EXCEEDS the true
+ * lash by construction, so a correct take-up MUST move the carriage, by a
+ * knowable amount:
+ *
+ *     carriage motion = commanded - true lash = detection distance + margin
+ *
+ * Both terms are deliberate and neither is optional. The measurement already
+ * reads high by the detection distance (you cannot see motion until it
+ * registers on the scale), and elsCalTakeupCommand() adds margin on top. On
+ * elspi (1 Z count ~= 2.52 servo steps, 2-count threshold, 20% / 10-step
+ * margin) that is ~6 Z counts of carriage motion at a 0.05 mm lash rising to
+ * ~10 counts at 0.20 mm — 3-5x over the detection threshold.
+ *
+ * This is what lets the confirmation gate return a POSITIVE answer at all. If
+ * the "may not move" claim were true of a calibrated take-up, the gate could
+ * only ever withhold. A calibrated take-up that produces no carriage motion
+ * means something is genuinely wrong.
  *
  * The discriminator only exists if you deliberately command PAST the expected
  * lash and watch for motion on the far side. That is what calibration does:
@@ -184,6 +206,99 @@ static inline int32_t elsCalMean(const int32_t *measured, int32_t n)
   int32_t sum = 0;
   for (int32_t i = 0; i < n; i++) sum += measured[i];
   return sum / n;
+}
+
+/* Mean, but 0 unless EVERY leg produced a real measurement.
+ *
+ * A run that measured two reversals and then lost the carriage leaves a zero in
+ * the set; averaging that silently halves the apparent lash. Callers deriving a
+ * threshold from the measurement need "is there a trustworthy calibration on
+ * file" to be a single unambiguous answer, so an incomplete set reports as no
+ * calibration rather than as a small one. */
+static inline int32_t elsCalMeanValid(const int32_t *measured, int32_t n)
+{
+  if (n <= 0) return 0;
+  int32_t sum = 0;
+  for (int32_t i = 0; i < n; i++) {
+    if (measured[i] <= 0) return 0;
+    sum += measured[i];
+  }
+  return sum / n;
+}
+
+/* Fraction of the EXPECTED carriage motion a take-up must produce to be
+ * confirmed. One half: enough to reject a take-up that barely twitched when it
+ * should have moved several counts, while leaving generous room for
+ * quantization, lash asymmetry between directions, and a machine whose lash has
+ * drifted somewhat since it was calibrated. Raising this toward 1 trades
+ * false-accepts for false-refusals, and a false refusal stops a working
+ * machine — so it stays conservative. */
+#define ELS_TAKEUP_CONFIRM_NUM 1
+#define ELS_TAKEUP_CONFIRM_DEN 2
+
+/* Per-pass take-up confirmation threshold, in Z counts.
+ *
+ * calMotionThreshCounts is the smallest motion the SCALE CAN RESOLVE. That is
+ * the right number for a calibration leg, where it sets the measurement bias.
+ * It is the WRONG number for confirming a take-up, and using it there is a much
+ * weaker test than the physics supports: a calibrated take-up is entitled to
+ * move the carriage a knowable amount, because the command deliberately exceeds
+ * the lash.
+ *
+ *     motion_steps  = commanded - trueLash
+ *     trueLash      ~= measuredMean - detectionDistance
+ *  => motion_counts  = (commanded - measuredMean) * zPerStep + motionThreshCounts
+ *
+ * (the detection distance cancels into the +motionThreshCounts term, which is
+ * why this needs no separate estimate of it). On elspi that is ~6 Z counts at a
+ * 0.05 mm lash rising to ~10 at 0.20 mm, against a bare floor of 2 — so a
+ * take-up that moves 2 counts when it should have moved 7 currently PASSES.
+ * That is a real signature: partial half-nut engagement, a slipping nut, a
+ * coupling on its way out.
+ *
+ * THIS IS A LOWER BOUND ONLY. NEVER TURN IT INTO A WINDOW.
+ * The carriage moves (commanded - lash still to traverse), and how much lash is
+ * still to traverse depends on where the nut was sitting when the take-up
+ * started. The formula above assumes the worst case — nut against the far wall,
+ * so the full lash must be crossed — which is the MINIMUM motion a healthy
+ * take-up can produce. A nut already partway across, or already against the
+ * take-up's own wall, moves the carriage further, up to the entire commanded
+ * distance. All of those are healthy. An upper bound would reject them, and
+ * would reject exactly the cases where the drivetrain was already well seated.
+ * Motion far in excess of expectation is not evidence of a fault here.
+ *
+ * FALLS BACK to the bare floor whenever the derivation is not trustworthy — no
+ * complete calibration on file, turning mode (zero thread geometry), or a
+ * hand-entered backlashSteps at or below the measurement. Falling back
+ * reproduces the previous behaviour exactly rather than inventing a threshold
+ * out of numbers that do not mean what this formula assumes. In particular an
+ * UNCALIBRATED machine must not become un-runnable because commanded minus zero
+ * looks like an enormous margin.
+ *
+ * A non-positive motionThreshCounts is returned unchanged so the fail-closed
+ * path (elsZMotionSeen never confirms) is preserved end to end. */
+static inline int32_t elsTakeupConfirmThreshold(int32_t commandedSteps,
+                                                int32_t measuredMeanSteps,
+                                                float threadPitchSteps,
+                                                float zCountsPerPitch,
+                                                int32_t motionThreshCounts)
+{
+  if (motionThreshCounts <= 0)  return motionThreshCounts;   /* fail closed, unchanged */
+  if (measuredMeanSteps  <= 0)  return motionThreshCounts;   /* no calibration on file */
+  if (threadPitchSteps == 0.0f || zCountsPerPitch == 0.0f) {
+    return motionThreshCounts;                                /* turning: no geometry */
+  }
+
+  int32_t marginSteps = commandedSteps - measuredMeanSteps;
+  if (marginSteps <= 0) return motionThreshCounts;            /* commanded at/below measured */
+
+  float zPerStep = zCountsPerPitch / threadPitchSteps;
+  if (zPerStep < 0.0f) zPerStep = -zPerStep;
+
+  float expected  = (float)marginSteps * zPerStep + (float)motionThreshCounts;
+  int32_t thresh  = (int32_t)((expected * (float)ELS_TAKEUP_CONFIRM_NUM)
+                              / (float)ELS_TAKEUP_CONFIRM_DEN);
+  return (thresh > motionThreshCounts) ? thresh : motionThreshCounts;
 }
 
 /* Begin a run. cuttingDir is the direction a cut feeds the leadscrew; the run

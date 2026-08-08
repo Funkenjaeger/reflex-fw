@@ -201,7 +201,16 @@ struct Rig {
         zBase = zCnt;
         lash.prevSteps = (int32_t)data.shared.servo.currentSteps;
         lash.carriage = 0;
-        lash.nutPos = 0;
+        /* Seat the nut against the wall the take-up drives AWAY from, so the
+         * take-up must traverse the full lash before the carriage moves. That is
+         * the worst case and the only one that exercises the thing under test.
+         * Starting at nutPos = 0 (the take-up direction's own wall) makes the
+         * carriage move on the very first step, so every take-up "confirms"
+         * regardless of lash — a fixture that cannot fail. Cutting direction
+         * here is negative (syncRatioNum < 0), so the far wall is lashSteps.
+         * Mirrors the emulator's own half-nut model, which deliberately drops
+         * the nut on the opposite wall for the same reason. */
+        lash.nutPos = lash.lashSteps;
     }
 
     void stepDriven() {
@@ -222,6 +231,23 @@ struct Rig {
         step(Z_PAST);
         step(Z_PAST);
         step(Z_CLEAR);                    /* retract clear so the resume edge lands */
+
+        /* Let the pulse generator catch up before resuming. Sync is gated while
+         * active == 1, so desiredSteps is static and currentSteps closes the
+         * gap. Without this the take-up inherits a large pulse BACKLOG and the
+         * carriage moves much further than the take-up commanded, which would
+         * mask exactly the under-motion this file tests for.
+         *
+         * The backlog is a FIXTURE artifact, not firmware behaviour: this rig
+         * advances the spindle 40 counts per tick against a 2/15 ratio (~5.3
+         * steps/tick) while the generator emits 1 pulse/tick, so desiredSteps
+         * runs away. On a real machine sync is gated for the whole retract and
+         * the operator takes seconds to press Cut, so the servo is long settled. */
+        for (int i = 0; i < 20000
+             && data.shared.servo.currentSteps != data.shared.servo.desiredSteps; i++) {
+            step(Z_CLEAR);
+        }
+
         data.shared.elsStop.lastIdealAdvance = SENTINEL;
         data.shared.elsStop.active = 0;   /* SW resume */
     }
@@ -283,6 +309,99 @@ int main() {
         rig.stepDriven();
         checkEq(rig.data.shared.elsStop.takeupPending, 0,
                 "enable 1->0 releases the withheld take-up");
+    }
+
+    /* ---------------- Partial engagement: moves, but not enough ------ */
+    /* The pair below is the whole point of the derived threshold. BOTH cases
+     * clear the bare 2-count detection floor, so both would have been confirmed
+     * under a floor-only rule. Only the second is actually healthy.
+     *
+     * Geometry is made self-consistent here: the rig's default registers encode
+     * the emulator's zPerStep while the lash model advances 1 Z count per 3
+     * servo steps, so zCountsPerPitch is set to match the model. Otherwise the
+     * threshold would be derived from geometry the simulated drivetrain does
+     * not obey. */
+    /* Numbers are chosen with generous separation on BOTH sides of the
+     * threshold. The ramp overshoots slightly past the take-up target, and each
+     * overshoot step is extra carriage motion, so a case sitting one or two
+     * counts from the boundary measures the overshoot rather than the guard.
+     * calMeasured 65, commanded 105 (margin 40), zPerStep 0.5, floor 2
+     *   => expected 40*0.5 + 2 = 22 counts, threshold 11. */
+    printf("\n-- PARTIAL ENGAGEMENT: carriage moves, but less than it should --\n");
+    {
+        Rig rig;
+        rig.init(/*backlashSteps*/ 105, /*motionThresh*/ 2, /*coupled*/ true,
+                 /*true lash*/ 95);                    /* worn / partly engaged */
+        rig.lash.stepsPerZCount = 2;
+        rig.data.shared.elsStop.zCountsPerPitch =
+            rig.data.shared.elsStop.threadPitchSteps / 2.0f;
+        for (int i = 0; i < 3; i++) rig.data.shared.elsStop.calMeasured[i] = 65;
+
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+        for (int i = 0; i < 60000; i++) rig.stepDriven();
+
+        /* commanded 105 - true lash 95 = 10 steps = 5 Z counts. Comfortably
+         * clears the bare 2-count floor; nowhere near the derived 11. */
+        checkEq(rig.data.shared.elsStop.takeupThreshCounts, 11,
+                "threshold derived from expected motion, not the bare floor");
+        check(rig.data.shared.elsStop.lastTakeupZDelta > 2,
+              "carriage DID move, and would have cleared the bare 2-count floor");
+        check(rig.data.shared.elsStop.lastTakeupZDelta < 11,
+              "...but moved less than a calibrated take-up should");
+        checkEq(rig.data.shared.elsStop.takeupPending, 1, "WITHHELD");
+        check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
+              "no phase correction on a partially engaged take-up");
+    }
+
+    printf("\n-- positive control: same setup, healthy lash --\n");
+    {
+        Rig rig;
+        rig.init(/*backlashSteps*/ 105, /*motionThresh*/ 2, /*coupled*/ true,
+                 /*true lash*/ 65);                    /* what it was calibrated at */
+        rig.lash.stepsPerZCount = 2;
+        rig.data.shared.elsStop.zCountsPerPitch =
+            rig.data.shared.elsStop.threadPitchSteps / 2.0f;
+        for (int i = 0; i < 3; i++) rig.data.shared.elsStop.calMeasured[i] = 65;
+
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+        for (int i = 0; i < 60000 && rig.data.shared.elsStop.takeupPending; i++)
+            rig.stepDriven();
+
+        checkEq(rig.data.shared.elsStop.takeupThreshCounts, 11, "same derived threshold");
+        checkEq(rig.data.shared.elsStop.takeupPending, 0,
+                "CONFIRMED - a healthy lash clears the stricter demand");
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_CAL_OK, "takeupResult OK");
+    }
+
+    /* The threshold is a LOWER BOUND, never a window. Where the nut sits when a
+     * take-up starts decides how much lash is left to traverse, so a well-seated
+     * drivetrain moves the carriage MUCH further than the worst-case estimate --
+     * up to the entire commanded distance. All of that is healthy. */
+    printf("\n-- nut already seated: carriage moves far more, still confirmed --\n");
+    {
+        Rig rig;
+        rig.init(/*backlashSteps*/ 105, /*motionThresh*/ 2, /*coupled*/ true,
+                 /*true lash*/ 65);
+        rig.lash.stepsPerZCount = 2;
+        rig.data.shared.elsStop.zCountsPerPitch =
+            rig.data.shared.elsStop.threadPitchSteps / 2.0f;
+        for (int i = 0; i < 3; i++) rig.data.shared.elsStop.calMeasured[i] = 65;
+
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+        rig.lash.nutPos = 0;      /* already against the take-up's own wall */
+        for (int i = 0; i < 60000 && rig.data.shared.elsStop.takeupPending; i++)
+            rig.stepDriven();
+
+        check(rig.data.shared.elsStop.lastTakeupZDelta > 11,
+              "moved far beyond the expected minimum");
+        checkEq(rig.data.shared.elsStop.takeupPending, 0,
+                "CONFIRMED - excess motion is not a fault (lower bound, not a window)");
     }
 
     /* ---------------- Unconfigured threshold fails closed ------------ */

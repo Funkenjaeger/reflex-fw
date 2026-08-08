@@ -129,6 +129,52 @@ int main() {
     checkEq(elsCalTakeupCommand(0, 20, 100, 10),     0, "no measurement yields no command");
     checkEq(elsCalTakeupCommand(-5, 20, 100, 10),    0, "negative measurement yields no command");
 
+    /* ---------------- Derived take-up confirmation threshold -------------- */
+    printf("\n-- elsTakeupConfirmThreshold (expected motion, not the bare floor) --\n");
+    {
+        /* elspi-shaped geometry: zPerStep = zCountsPerPitch/threadPitchSteps.
+         * 1 Z count ~= 2.52 servo steps, so zPerStep ~= 0.397. */
+        const float TPS = 533.333f, ZCP = 211.67f;   /* 211.67/533.333 = 0.3969 */
+
+        /* lash 60 -> measured ~65, commanded 78, margin 13.
+         * expected = 13*0.3969 + 2 = 7.2 counts; half of that = 3. */
+        checkEq(elsTakeupConfirmThreshold(78, 65, TPS, ZCP, 2), 3,
+                "calibrated: demands a fraction of expected motion, not the floor");
+
+        /* Bigger lash -> bigger margin -> a proportionally stricter demand. */
+        checkEq(elsTakeupConfirmThreshold(127, 106, TPS, ZCP, 2), 5,
+                "coarser lash raises the demand");
+
+        /* MUTATION: return motionThreshCounts unconditionally and every
+         * assertion in this block collapses to 2 — which is precisely the weak
+         * test this function exists to replace. */
+
+        /* ---- fallbacks: each must reproduce the bare floor exactly ---- */
+        checkEq(elsTakeupConfirmThreshold(78, 0, TPS, ZCP, 2), 2,
+                "NO CALIBRATION on file falls back to the floor");
+        checkEq(elsTakeupConfirmThreshold(78, 65, 0.0f, ZCP, 2), 2,
+                "turning mode (no thread geometry) falls back to the floor");
+        checkEq(elsTakeupConfirmThreshold(78, 65, TPS, 0.0f, 2), 2,
+                "zero zCountsPerPitch falls back to the floor");
+        checkEq(elsTakeupConfirmThreshold(60, 65, TPS, ZCP, 2), 2,
+                "commanded at/below measured falls back to the floor");
+        /* The uncalibrated case is the load-bearing fallback: commanded minus
+         * zero looks like an enormous margin, and without the guard a machine
+         * that has never been calibrated would become un-runnable. */
+        checkEq(elsTakeupConfirmThreshold(78, 0, TPS, ZCP, 0), 0,
+                "unconfigured floor stays 0 so the fail-closed path is preserved");
+    }
+
+    printf("\n-- elsCalMeanValid (an incomplete run is NOT a small calibration) --\n");
+    {
+        int32_t good[3] = {64, 65, 66};
+        int32_t partial[3] = {64, 65, 0};
+        checkEq(elsCalMeanValid(good, 3), 65, "complete set averages");
+        /* MUTATION: use elsCalMean here and a half-finished run reports a
+         * plausible-but-small lash, which then inflates the derived threshold. */
+        checkEq(elsCalMeanValid(partial, 3), 0, "incomplete set reports NO calibration");
+    }
+
     /* ---------------- Spread / mean --------------------------------------- */
     printf("\n-- elsCalSpread / elsCalMean --\n");
     { int32_t m[3] = {100, 104, 98};

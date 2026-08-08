@@ -550,8 +550,24 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         shared->elsStop.lastTakeupZDelta =
             elsZMovedAlong(zNow, data->elsStopTakeupZStart, data->elsStopTakeupZSign, 1);
 
+        /* Confirm against EXPECTED motion, not the bare detection floor. A
+         * calibrated take-up is entitled to move the carriage by
+         * (margin + detection distance); demanding a fraction of that rejects a
+         * take-up that barely twitched when it should have moved several counts
+         * — partial half-nut engagement, a slipping nut — which the floor alone
+         * would wave through. Falls back to the floor with no calibration on
+         * file or in turning mode, so an uncommissioned machine behaves exactly
+         * as it did before. Published for the UI so a refusal can say what it
+         * wanted, not just that it refused. */
+        shared->elsStop.takeupThreshCounts = elsTakeupConfirmThreshold(
+            (int32_t)shared->elsStop.backlashSteps,
+            elsCalMeanValid(shared->elsStop.calMeasured, ELS_CAL_CYCLES),
+            shared->elsStop.threadPitchSteps,
+            shared->elsStop.zCountsPerPitch,
+            shared->elsStop.calMotionThreshCounts);
+
         if (elsZMotionSeen(zNow, data->elsStopTakeupZStart,
-                           shared->elsStop.calMotionThreshCounts)) {
+                           shared->elsStop.takeupThreshCounts)) {
           if (shared->elsStop.takeupResult != ELS_CAL_OK) {
             shared->elsStop.takeupResult = ELS_CAL_OK;
           }

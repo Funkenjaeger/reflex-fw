@@ -164,9 +164,28 @@ the comparison was absent.
 "Z must move `backlashSteps` worth of counts" is wrong, and wrong in the unsafe
 direction — it would refuse every correctly configured take-up. The take-up's
 whole job is to drive the leadscrew *across* the lash window, and motion spent
-inside that window moves the nut, not the carriage. **A correct take-up may move
-the carriage barely at all.** So "carriage didn't move" cannot by itself
-distinguish a healthy take-up from an open half-nut.
+inside that window moves the nut, not the carriage. So for a take-up sized *at
+or below* the true lash, the carriage may not move at all, and "carriage didn't
+move" cannot then distinguish a healthy take-up from an open half-nut.
+
+That is the regime the **old** open-loop take-up lived in, with `backlashSteps`
+hand-entered against an unknown lash. It is emphatically *not* the regime this
+feature creates, and the distinction is load-bearing: once calibrated, the
+commanded take-up exceeds the true lash by construction, so a correct take-up
+**must** move the carriage, by
+
+```
+carriage motion = commanded − true lash = detection distance + margin
+```
+
+Both terms are deliberate. The measurement already reads high by the detection
+distance (motion is invisible until it registers on the scale), and the take-up
+adds margin on top. On elspi — 1 Z count ≈ 2.52 servo steps, 2-count threshold,
+20% / 10-step margin — that is ~6 Z counts of carriage motion at a 0.05 mm lash
+rising to ~10 counts at 0.20 mm, i.e. 3–5× over the detection threshold.
+
+This is what lets the gate return a *positive* answer at all. Were "may not
+move" true of a calibrated take-up, the gate could only ever withhold.
 
 The discriminator exists only if the firmware deliberately commands *past* the
 expected lash and watches for motion on the far side — which is exactly what
