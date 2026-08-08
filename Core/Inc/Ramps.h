@@ -23,6 +23,7 @@
 #include "cmsis_os2.h"
 #include "Modbus.h"
 #include "Scales.h"
+#include "els_backlash_cal.h"
 
 #define MODBUS_ADDRESS 17
 
@@ -110,6 +111,24 @@ typedef struct {
   float    lastActualAdvance; // READ-ONLY (firmware-owned): last resume's deltaZ × threadPitchSteps / zCountsPerPitch
   float    lastPhaseError;    // READ-ONLY (firmware-owned): last resume's idealAdvance − actualAdvance (pre-modulo)
   float    lastCorrection;    // READ-ONLY (firmware-owned): last resume's correction added to stepsToGo (post-modulo)
+  /* --- Backlash calibration + closed-loop take-up confirmation. APPENDED AT THE
+   * TAIL of elsStop_t, which is itself the last member of rampsSharedData_t, so
+   * every pre-existing Modbus register offset is unchanged. uint16s are grouped
+   * ahead of the 32-bit fields so the block packs with ZERO padding, and the
+   * next feature's registers append behind it the same way (reserved order per
+   * the auto-start plan: re-sync latchCommand/latchSeq, then the auto-start
+   * block). Algorithm, units, and the physics that constrain all of this live in
+   * Core/Inc/els_backlash_cal.h — read that before changing anything here. */
+  uint16_t protocolVersion;       // READ-ONLY (firmware-owned): register-layout version, starts at 1. Bump whenever this struct changes; reflex-ui checks it at connect so a map mismatch names itself instead of surfacing as garbled reads
+  uint16_t calCommand;            // bidirectional: SW writes 1 to request a calibration run; FIRMWARE CLEARS IT on consume. This is the atomic hand-off. SW must NOT poll it for completion — it clears the instant the ISR picks it up, long before the run finishes. Edge-detect calSeq instead
+  uint16_t calSeq;                // READ-ONLY (firmware-owned): increments once per finished run, success OR failure. Monotonic, so a host polling at Modbus rates cannot alias a fast run
+  uint16_t calResult;             // READ-ONLY (firmware-owned): outcome of the run counted by calSeq. ELS_CAL_* in els_backlash_cal.h; 0 = OK
+  uint16_t takeupResult;          // READ-ONLY (firmware-owned): outcome of the last take-up. ELS_CAL_*/ELS_TAKEUP_* in els_backlash_cal.h; 0 = OK. Replaces a binary fault flag so "carriage never moved" and "never reached target" stay distinguishable
+  uint16_t takeupSeq;             // READ-ONLY (firmware-owned): increments once per take-up outcome; lets SW tell completed-normally from host-cleared, which takeupPending alone cannot
+  int32_t  calMeasured[3];        // READ-ONLY (firmware-owned): lash measured at each of the 3 reversals, in servo steps. The HOST judges whether the spread is acceptable — measurement lives here, policy lives in the UI
+  int32_t  calCeilingSteps;       // SW write: per-leg hard ceiling in servo steps. Driving this far without Z moving IS the open-half-nut / uncoupled failure. MACHINE-SPECIFIC; size it comfortably past the largest credible lash
+  int32_t  calMotionThreshCounts; // SW write: Z scale counts that count as real motion. MACHINE-SPECIFIC — ~2 counts on elspi (200 counts/mm, so 1 count ≈ 2.5 servo steps); emulator is 400 counts/mm. 0 disables detection and FAILS CLOSED (never confirms) — deliberate: an unconfigured threshold must refuse, not wave everything through
+  int32_t  lastTakeupZDelta;      // READ-ONLY (firmware-owned): signed Z counts moved across the last take-up, projected onto the take-up direction. NEGATIVE means the carriage moved the WRONG way — a distinct fault signature from "didn't move"
 } elsStop_t;
 
 typedef struct {
@@ -143,6 +162,10 @@ typedef struct {
   int32_t  elsStopTakeupSign;         // direction of the takeup move (+1/-1); completion is a crossing test, not exact equality
   int32_t  elsStopSettleCount;        // ticks elapsed since takeup commanded-complete; dwell before phase-correction Z snapshot
   uint16_t elsStopHysteresisCleared;  // 1 once the axis has cleared stopPosition by >= elsStop.hysteresis counts; cleared when firmware latches active = 1
+  int32_t  elsStopTakeupZStart;       // scales[elsStop.scaleIndex].position captured at takeup INITIATION; the baseline the Z confirmation gate measures against
+  int32_t  elsStopTakeupZSign;        // +1/-1: sign the Z scale should move in for this takeup; sign(signedTakeup) x droSign. Only the magnitude gates completion — the sign turns lastTakeupZDelta into a wrong-way diagnostic
+  int32_t  elsStopTakeupTicks;        // ISR ticks since takeup initiation; backstop against a takeup that never reaches target (see ELS_TAKEUP_TIMEOUT_TICKS)
+  elsCalCtx_t elsCal;                 // backlash calibration run state; non-Modbus, the ISR owns it entirely (els_backlash_cal.h)
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

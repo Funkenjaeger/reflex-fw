@@ -78,6 +78,14 @@ add_executable(els_phase_test ${CMAKE_SOURCE_DIR}/test/els_phase_test.cpp)
 target_link_libraries(els_phase_test m)
 add_test(NAME els_phase_test COMMAND els_phase_test)
 
+# Backlash calibration / take-up confirmation: exercises the pure decision layer
+# in Core/Inc/els_backlash_cal.h against a simulated drivetrain with lash.
+# Header-only — no HAL, no firmware sources, no emulator physics.
+add_executable(els_backlash_cal_test ${CMAKE_SOURCE_DIR}/test/els_backlash_cal_test.cpp)
+target_include_directories(els_backlash_cal_test PRIVATE ${CMAKE_SOURCE_DIR}/../Core/Inc)
+target_link_libraries(els_backlash_cal_test m)
+add_test(NAME els_backlash_cal_test COMMAND els_backlash_cal_test)
+
 # Half-nut engagement physics tests: exercise LathePhysics directly. Links
 # physics.cpp + config.cpp (EmuConfig ctor); the test file stubs the shim
 # externals (emu_hw, emu_log_event, emu_update_timer_counters), so hal_shim.c
@@ -106,6 +114,19 @@ add_test(NAME els_boot_delta_test COMMAND els_boot_delta_test)
 # a control case (resume after retracting) that passes -- the pair is what
 # distinguishes a real defect from a broken test. Expect this target RED until
 # the resume path is fixed.
+# ISR-level take-up confirmation + calibration driver. Same stub strategy as the
+# relatch test (links Ramps.c, stubs every external), but drives the servo's own
+# step pulses through a lash model so the Z scale responds the way a real
+# drivetrain does. Covers the wiring the pure els_backlash_cal_test cannot:
+# baseline capture, withholding, result/seq publication, the enable escape hatch.
+add_executable(els_takeup_confirm_test
+    ${CMAKE_SOURCE_DIR}/test/els_takeup_confirm_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_takeup_confirm_test m pthread)
+add_test(NAME els_takeup_confirm_test COMMAND els_takeup_confirm_test)
+
 add_executable(els_stop_resume_relatch_test
     ${CMAKE_SOURCE_DIR}/test/els_stop_resume_relatch_test.cpp
     ${FW_DIR}/Core/Src/Ramps.c)

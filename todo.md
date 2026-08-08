@@ -89,13 +89,64 @@ instead of leaving bare `TODO:` comments in code.
   pass, so the backlash takeup and `applyPhaseCorrection` are both silently
   skipped — `takeupPending` never sets and `stepsToGo` never moves. The machine
   just looks like it re-stopped.
-- `elsStop.hysteresis` (`Core/Inc/Ramps.h:102`, documented "encoder counts carriage
-  must retract before re-enabling") is declared and **never read anywhere in the
-  firmware** — one repo-wide hit, the declaration itself. Wiring it into the
-  Ramps.c:403 trigger test is the obvious fix, but it needs a decision on whether
-  the retract is measured from `stopPosition` or from `latchedZ`, and on what a
-  0 (documented "no hysteresis") should do about the re-latch race.
-- Fix is deliberately NOT applied — logged for a decision first.
+- **FIXED 2026-08-07 in `aa07cff`.** `elsStop.hysteresis` (`Core/Inc/Ramps.h:102`)
+  was declared and never read anywhere in the firmware, while reflex-ui actively
+  wrote it — so the 800 it wrote for standalone-stop was a no-op and every stop
+  behaved as tight/0. It is now read by the trigger gate.
+  Both open questions were decided: retract is measured **from `stopPosition`**,
+  and `hysteresis == 0` is an explicit **no-op gate** preserving prior behavior,
+  which is what keeps reflex-ui's `0` writes for guided/retract/wizard modes safe.
+  Implementation is one tracking field in `rampsHandler_t` plus ~9 lines inside the
+  `Ramps.c:403-408` block; `Ramps.c:455` is untouched.
+  Emulator ctest went 3/4 → 4/4: the two `a165e07` repro assertions now pass
+  **unmodified**, and the gate was mutation-tested in both directions (forcing the
+  cleared flag true fails all five new GATE assertions; setting `hysteresis = 0`
+  restores the pre-fix outcome exactly).
+  Consequence for the ELS auto-start plan: `hysteresis` is now live, so
+  `armRetractCounts` must take a **fresh** register rather than reusing this one.
+- **NOT proven on hardware.** The emulator has no servo dynamics, no Modbus timing
+  and no metal. Do not treat 4/4 as a machine result.
+
+---
+
+## ELS backlash: closed-loop calibration + take-up confirmation (2026-08-08)
+
+### Landed
+- The take-up is no longer open loop. Completion now requires **confirmed Z-scale
+  motion**, not just "the firmware finished issuing the pulses it decided to
+  issue". Fails closed: no motion means `takeupPending` stays set, sync stays
+  gated, and `applyPhaseCorrection()` does not run on an uncoupled drivetrain.
+  Recovery is the `elsStop.enable` 1->0 escape hatch.
+- `calCommand`-driven calibration measures the lash directly (three reversals,
+  counting servo steps until Z moves). Host judges consistency and writes
+  `backlashSteps = measured + max(20%, floor)`.
+- `protocolVersion` register added and checked by reflex-ui at connect.
+- `rampsSharedData_t` 264 -> 300 bytes; `KNOWN_ROOT_SIZE` moved in lockstep.
+- Superseded local commit `d917641` (a takeup gate built around an operator-set
+  `takeupMinZCounts` threshold rather than a measurement). Rewound; preserved on
+  branch `archive/d917641-takeup-zconfirm` — its 470-line test is worth mining.
+
+### Two defects found by the ISR-level tests, both real
+- **Calibration must gate sync.** `scales[].syncEnable` is independent of
+  `elsStop.enable`, so a turning spindle drives the leadscrew straight through
+  the measurement. Guarding on `enable` alone was insufficient.
+- **Legs must arm on the first pulse in the NEW direction**, not when the
+  reversal is commanded. The ramp overshoots while decelerating and that return
+  travel is lash traversal; baselining at the command instant measured the
+  deceleration transient instead (6 steps against a true lash of 60).
+
+### NOT proven on hardware
+- Emulator + host tests only: no servo dynamics, no Modbus timing, no metal.
+- The calibration run is the first thing in this codebase that commands
+  **bidirectional carriage motion**. Bench it with the tool well clear before it
+  ever sees a workpiece.
+- `calCeilingSteps` and `calMotionThreshCounts` are machine-specific and have
+  never been set on elspi. Defaults are sized for 200 counts/mm Z; the emulator
+  is 400 counts/mm.
+- Open question for the machine: the measurement reads HIGH by the detection
+  distance (~2 Z counts ~= 5 servo steps on elspi). That bias is conservative
+  and deliberate, but confirm the real magnitude on metal before tuning the
+  margin floor down.
 
 ---
 

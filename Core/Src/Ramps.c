@@ -32,6 +32,15 @@
  * small so the emulator's bounded-guard scenario loop doesn't time out. */
 #define ELS_SETTLE_TICKS 50
 
+/* Backstop for a backlash takeup that never reaches its commanded target. ISR
+ * runs at ~100 kHz (TIM9, 10 us/tick), so this is ~5 s — far longer than any
+ * legitimate takeup (tens to low hundreds of steps) even at a slow maxSpeed, and
+ * deliberately generous because tripping it early would be worse than not having
+ * it. It is a DIAGNOSTIC, not a control: it does not release the sync gate (see
+ * the takeup block for why), it just names the failure so the UI can. The known
+ * way in is servoMode != 1, where stepsToGo is never consumed at all. */
+#define ELS_TAKEUP_TIMEOUT_TICKS 500000
+
 #ifdef EMULATOR_BUILD
 #include "emulator_state.h"
 
@@ -123,6 +132,16 @@ void RampsStart(rampsHandler_t *rampsData) {
 
   rampsData->shared.elsStop.referenceLatched = 0;
   rampsData->shared.elsStop.takeupPending = 0;
+  /* Register-layout version. Bump this whenever elsStop_t / rampsSharedData_t
+   * changes shape; reflex-ui reads it at connect so a firmware/UI map mismatch
+   * reports itself by name instead of surfacing as garbled register reads. */
+  rampsData->shared.elsStop.protocolVersion = 1;
+  rampsData->shared.elsStop.calCommand   = 0;
+  rampsData->shared.elsStop.calSeq       = 0;
+  rampsData->shared.elsStop.calResult    = ELS_CAL_OK;
+  rampsData->shared.elsStop.takeupResult = ELS_CAL_OK;
+  rampsData->shared.elsStop.takeupSeq    = 0;
+  rampsData->elsCal.phase                = ELS_CAL_IDLE;
 
   // Configure Pins
   configureOutputPin(DIR_GPIO_PORT, DIR_PIN);
@@ -336,6 +355,111 @@ static inline void applyPhaseCorrection(rampsSharedData_t *shared) {
 #endif
 }
 
+/* Leadscrew backlash calibration driver.
+ *
+ * Measures the lash by driving the carriage against a flank, then reversing and
+ * counting the servo steps consumed before the Z scale moves. That step count IS
+ * the backlash — see els_backlash_cal.h for why this is the only construction
+ * that can distinguish a healthy take-up from an uncoupled drivetrain, and why
+ * "Z must move backlashSteps worth" is wrong in the unsafe direction.
+ *
+ * Three reversals are measured; the HOST judges whether the spread is acceptable
+ * and writes the resulting backlashSteps. Measurement here, policy in the UI.
+ *
+ * The state machine itself is the pure elsCalTick(); this function is only the
+ * actuation shell — request intake, servo commands, abort conditions, and
+ * publishing results. That split is what makes the logic host-testable without
+ * the HAL.
+ *
+ * SAFETY: refuses to run unless elsStop.enable == 0 (no live job, so sync is not
+ * driving the leadscrew and the spindle cannot fight the measurement) and
+ * servoMode == 1 (otherwise stepsToGo is never consumed and the run would hang).
+ * Total travel is a few lash widths — well under a millimetre — but it IS
+ * bidirectional carriage motion with the half-nut engaged, so the operator-facing
+ * modal owns "tool clear of the work, spindle stopped". */
+static inline void elsCalUpdate(rampsHandler_t *data) {
+  rampsSharedData_t *shared = &data->shared;
+
+  /* ---- Request intake. calCommand is consumed atomically here and cleared in
+   * the same ISR pass, which is the whole point of the command/ack split: a
+   * 32-bit host write racing this ISR could otherwise be seen half-applied.
+   * calSeq is the ack — SW must edge-detect THAT, never poll calCommand. ---- */
+  if (shared->elsStop.calCommand != 0u) {
+    shared->elsStop.calCommand = 0u;
+    if (data->elsCal.phase == ELS_CAL_IDLE) {
+      uint16_t refuse = ELS_CAL_OK;
+      if (shared->elsStop.enable != 0u) {
+        refuse = ELS_CAL_ERR_ENABLED;
+      } else if (shared->fastData.servoMode != 1u) {
+        refuse = ELS_CAL_ERR_SERVOMODE;
+      } else if (shared->elsStop.calCeilingSteps <= 0
+                 || shared->elsStop.calMotionThreshCounts <= 0) {
+        refuse = ELS_CAL_ERR_CONFIG;
+      }
+
+      if (refuse != ELS_CAL_OK) {
+        shared->elsStop.calResult = refuse;
+        shared->elsStop.calSeq++;            /* refusals are outcomes too */
+      } else {
+        /* Cutting direction, same derivation as the takeup and els_phase.h. When
+         * no thread geometry is configured (a machine-level calibration on a
+         * fresh setup) the product is 0, which is not < 0, so this degrades to
+         * sign(syncRatioNum) — a sane default rather than a refusal. */
+        int32_t cuttingDir = (shared->scales[0].syncRatioNum > 0) ? 1 : -1;
+        if (shared->elsStop.threadPitchSteps * shared->elsStop.zCountsPerPitch < 0.0f) {
+          cuttingDir = -cuttingDir;
+        }
+        shared->servo.stepsToGo    = 0;
+        shared->servo.currentSpeed = 0;
+        elsCalStart(&data->elsCal, cuttingDir,
+                    (int32_t)shared->servo.currentSteps,
+                    shared->scales[shared->elsStop.scaleIndex].position);
+        shared->servo.stepsToGo = data->elsCal.driveSign * shared->elsStop.calCeilingSteps;
+      }
+    }
+  }
+
+  if (data->elsCal.phase == ELS_CAL_IDLE) return;
+
+  /* ---- Abort. Either condition means the ground shifted under a run that is
+   * physically moving the carriage, so stop commanding motion immediately rather
+   * than finishing a measurement whose premises no longer hold. ---- */
+  if (shared->elsStop.enable != 0u || shared->fastData.servoMode != 1u) {
+    shared->servo.stepsToGo    = 0;
+    shared->servo.currentSpeed = 0;
+    data->elsCal.phase         = ELS_CAL_IDLE;
+    shared->elsStop.calResult  = ELS_CAL_ERR_ABORTED;
+    shared->elsStop.calSeq++;
+    return;
+  }
+
+  elsCalAction_t act = elsCalTick(&data->elsCal,
+                                  (int32_t)shared->servo.currentSteps,
+                                  shared->scales[shared->elsStop.scaleIndex].position,
+                                  shared->servo.stepsToGo,
+                                  shared->elsStop.calMotionThreshCounts);
+
+  if (act.startPhase) {
+    /* Command the full ceiling; the leg ends early the moment Z moves. Draining
+     * to zero without motion is exactly the uncoupled failure. */
+    shared->servo.stepsToGo = act.driveSign * shared->elsStop.calCeilingSteps;
+  }
+
+  if (act.finished) {
+    shared->servo.stepsToGo    = 0;
+    shared->servo.currentSpeed = 0;
+    /* Publish partial measurements on failure too — a run that measured two
+     * reversals and then lost the carriage is diagnostically richer than a bare
+     * error code, and the host already knows how many to trust from calResult. */
+    for (int32_t i = 0; i < ELS_CAL_CYCLES; i++) {
+      shared->elsStop.calMeasured[i] = data->elsCal.measured[i];
+    }
+    shared->elsStop.calResult = data->elsCal.result;
+    shared->elsStop.calSeq++;
+    data->elsCal.phase = ELS_CAL_IDLE;
+  }
+}
+
 void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   uint32_t start = DWT->CYCCNT;
   // Reset the step pin as soon as possible
@@ -355,14 +479,26 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   // Auto-clear active when enable is deasserted
   if (data->elsStopPreviousEnable && !shared->elsStop.enable) {
     shared->elsStop.active = 0;
+    /* Also abandon any in-flight takeup. This is the escape hatch that makes the
+     * fail-closed Z confirmation gate below RECOVERABLE: a takeup withheld for
+     * want of Z confirmation holds takeupPending = 1 indefinitely, which gates
+     * sync off, and nothing else in the ISR clears it. Dropping enable ends the
+     * job, so there is nothing left to confirm and no phase correction worth
+     * applying. Without this, failing closed would be unrecoverable — a worse
+     * defect than the one being fixed. */
+    shared->elsStop.takeupPending = 0;
+    data->elsStopSettleCount      = 0;
+    data->elsStopTakeupTicks      = 0;
   }
 
   data->elsStopPreviousEnable = shared->elsStop.enable;
 
   // Detect completion of post-resume backlash takeup move, dwell for the servo
-  // to settle, then apply phase correction. takeupPending stays set during the
-  // dwell so sync remains gated and the servo holds at the takeup target.
+  // to settle, CONFIRM THE CARRIAGE ACTUALLY MOVED, then apply phase correction.
+  // takeupPending stays set throughout so sync remains gated and the servo holds
+  // at the takeup target.
   if (shared->elsStop.takeupPending) {
+    data->elsStopTakeupTicks++;
     // Crossing test (not exact equality): the servo emits one step per servoCycle
     // while desiredSteps can advance several steps per tick, so currentSteps may
     // skip the exact target (esp. across the reversal pulse-skip). Treat the
@@ -376,10 +512,72 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
       if (data->elsStopSettleCount < ELS_SETTLE_TICKS) {
         data->elsStopSettleCount++;        // dwell after commanded-complete
       } else {
-        data->elsStopSettleCount = 0;
-        shared->elsStop.takeupPending = 0;
-        applyPhaseCorrection(shared);       // snapshot Z only once settled
+        /* ---- Z CONFIRMATION GATE -------------------------------------------
+         * `takeupReached` above is a PURE COMMANDED-STEP-COUNT CROSSING TEST. It
+         * compares servo.currentSteps against a target this same firmware
+         * computed and assigned at initiation, so it confirms exactly one thing:
+         * that the firmware finished issuing the pulses it decided to issue.
+         * Nothing in it observes the machine. If the half-nut is open, the servo
+         * is disabled or faulted, or the coupling has slipped, currentSteps
+         * crosses the target on schedule and the firmware reports a completed
+         * takeup into thin air — and applyPhaseCorrection then snapshots a Z
+         * from a drivetrain that was never coupled.
+         *
+         * ("Wait longer" is NOT the fix — see the ELS_SETTLE_TICKS note at the
+         * top of this file. A 1 s dwell was tried on the real machine and
+         * changed nothing. Dwelling cannot manufacture evidence.)
+         *
+         * The gate is decidable ONLY because the take-up is commanded past the
+         * measured lash (elsCalTakeupCommand's measured + margin). A take-up
+         * sized exactly at the lash legitimately produces zero carriage motion,
+         * which is indistinguishable from an open half-nut — see the physics
+         * note in els_backlash_cal.h. The margin is what creates the evidence.
+         *
+         * FAIL CLOSED, and note WHERE this runs: at the START of a pass. active
+         * has just been cleared, the takeup has consumed stepsToGo, and
+         * takeupPending gates the sync accumulator below. The machine is
+         * standing still with the tool clear of the work, about to BEGIN a cut.
+         * Refusing here declines to start a pass; it does not abandon a tool
+         * buried in a groove. Between a machine that visibly refuses to start
+         * and one that confidently starts in the wrong groove, the refusal is
+         * far the cheaper failure.
+         *
+         * The gate RE-EVALUATES every tick rather than latching dead, so a
+         * takeup whose Z motion is merely late still clears itself;
+         * elsStopSettleCount is deliberately left at ELS_SETTLE_TICKS while
+         * withheld so no second dwell is imposed once it does. */
+        int32_t zNow = shared->scales[shared->elsStop.scaleIndex].position;
+        shared->elsStop.lastTakeupZDelta =
+            elsZMovedAlong(zNow, data->elsStopTakeupZStart, data->elsStopTakeupZSign, 1);
+
+        if (elsZMotionSeen(zNow, data->elsStopTakeupZStart,
+                           shared->elsStop.calMotionThreshCounts)) {
+          if (shared->elsStop.takeupResult != ELS_CAL_OK) {
+            shared->elsStop.takeupResult = ELS_CAL_OK;
+          }
+          shared->elsStop.takeupSeq++;
+          data->elsStopSettleCount      = 0;
+          data->elsStopTakeupTicks      = 0;
+          shared->elsStop.takeupPending = 0;
+          applyPhaseCorrection(shared);     // snapshot Z only once CONFIRMED
+        } else if (shared->elsStop.takeupResult != ELS_TAKEUP_ERR_UNCONFIRMED) {
+          /* Report once on the transition, not every tick, so takeupSeq stays a
+           * count of OUTCOMES rather than a tick counter. */
+          shared->elsStop.takeupResult = ELS_TAKEUP_ERR_UNCONFIRMED;
+          shared->elsStop.takeupSeq++;
+        }
       }
+    } else if (data->elsStopTakeupTicks > ELS_TAKEUP_TIMEOUT_TICKS
+               && shared->elsStop.takeupResult != ELS_TAKEUP_ERR_TIMEOUT) {
+      /* Backstop for a takeup that never reaches its target at all — the
+       * servoMode != 1 hazard being the known way in (stepsToGo is only consumed
+       * by updateIndexingPosition, so in mode 0 or 2 the takeup never advances
+       * and sync stays gated with nothing to diagnose it). This does NOT release
+       * the gate: releasing would start a pass on a takeup we know did not
+       * happen. It names the failure so the UI can say so; recovery is the
+       * enable 1->0 escape hatch above. */
+      shared->elsStop.takeupResult = ELS_TAKEUP_ERR_TIMEOUT;
+      shared->elsStop.takeupSeq++;
     }
   }
 
@@ -457,8 +655,21 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         }
       }
 
-      // Sync paused while stopped or while a backlash takeup is in progress
-      if (!shared->elsStop.active && !shared->elsStop.takeupPending) {
+      /* Sync paused while stopped, while a backlash takeup is in progress, or
+       * while a backlash CALIBRATION is running.
+       *
+       * The calibration gate is not optional and elsStop.enable == 0 does not
+       * imply it: scales[].syncEnable is INDEPENDENT of the ELS stop feature, so
+       * a turning spindle drives the leadscrew through sync even with no
+       * threading job armed. During a calibration that motion is superimposed on
+       * the measurement legs — at the reference geometry it swamps them
+       * outright, and the run either measures the spindle or fails to arm at all
+       * (observed: measured 0,0,0 / NO_MOTION on a perfectly healthy simulated
+       * drivetrain before this gate existed). A calibration leg is only
+       * meaningful if the leadscrew is moved by the calibration and nothing
+       * else. */
+      if (!shared->elsStop.active && !shared->elsStop.takeupPending
+          && data->elsCal.phase == ELS_CAL_IDLE) {
         shared->servo.desiredSteps += data->scalesSyncDeltaPos[i].scaledDelta;
       }
     }
@@ -486,12 +697,33 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         data->elsStopTakeupTargetSteps = (int32_t)shared->servo.currentSteps + signedTakeup;
         data->elsStopTakeupSign        = (signedTakeup >= 0) ? 1 : -1;
         shared->elsStop.takeupPending  = 1;
+        /* Baseline for the Z confirmation gate. Captured at INITIATION, before
+         * any pulses are issued, so the gate measures the whole takeup. */
+        data->elsStopTakeupZStart      = shared->scales[shared->elsStop.scaleIndex].position;
+        data->elsStopTakeupTicks       = 0;
+        shared->elsStop.takeupResult   = ELS_CAL_OK;
+        /* Direction the Z scale should count in for this takeup. droSign is
+         * els_phase.h's quantity — how a cutting-direction servo move changes the
+         * DRO — and the takeup itself runs in cuttingDir, so this reduces
+         * algebraically to stopDirection. Kept as the explicit product because
+         * the reduction is a coincidence of this call site, not an invariant.
+         * Only the MAGNITUDE gates completion (see els_backlash_cal.h on why
+         * detection is polarity-free); this sign is what turns lastTakeupZDelta
+         * into a wrong-way diagnostic rather than just a distance. */
+        data->elsStopTakeupZSign       = data->elsStopTakeupSign
+                                       * ((int32_t)shared->elsStop.stopDirection * cuttingDir);
       } else {
         applyPhaseCorrection(shared);
       }
     }
   }
   data->elsStopPreviousActive = shared->elsStop.active;
+
+  /* Backlash calibration. Deliberately placed AFTER the scale-read loop (so it
+   * sees this tick's Z, not last tick's) and BEFORE updateIndexingPosition (so a
+   * drive burst it commands takes effect the same tick, and the stepsToGo it
+   * reads is the post-drain value from the previous tick). */
+  elsCalUpdate(data);
 
   if (shared->fastData.servoMode == 1) updateIndexingPosition(data);
   if (shared->fastData.servoMode == 2) updateJogPosition(data);
