@@ -152,6 +152,43 @@ instead of leaving bare `TODO:` comments in code.
 
 ## Emulator
 
+### Model manual carriage movement with the half-nut open (TEST-INFRASTRUCTURE GAP)
+
+**Found by hardware, 2026-08-08. This gap is why a real defect in the take-up
+confirmation gate was unreachable by any test.**
+
+The emulator (and `els_takeup_confirm_test.cpp`'s `Lash` model) computes the
+carriage position as a PURE FUNCTION of `servo.currentSteps`. There are exactly
+two worlds: coupled, where Z moves when driven past lash, and uncoupled, where
+Z NEVER moves. Reality has a third — **uncoupled but moving anyway**, because
+the operator pushed the carriage with the half-nut open.
+
+That third state is not a corner case here. Manual carriage movement with the
+nut open is a first-class part of how this machine is used: the whole ELS stop
+resume model is built on the operator hand-cranking between passes, and the
+interactive re-sync feature (task 6a768a98) is entirely about it.
+
+**What it cost:** the take-up confirmation gate tested "did Z move?" when it
+needed to test "did Z move BECAUSE WE DROVE IT?". On hardware, a withheld
+take-up was satisfied by the operator nudging the carriage by hand with the nut
+open. No test could express that, because the model has no input for carriage
+motion that the servo did not cause.
+
+**Needed:**
+- An external carriage-displacement input to `LathePhysics` — a nudge/jog the
+  test or dashboard can apply independently of the servo, valid only while the
+  half-nut is open (with it closed the carriage is captive).
+- The same degree of freedom in the unit-test `Lash` fixture, so ISR-level tests
+  can inject motion mid-take-up and mid-calibration.
+- Regression cases: a withheld take-up must NOT be satisfied by hand motion; a
+  calibration leg must not be satisfied by it either.
+
+**Design note for whoever does this:** a fixture that cannot express a failure
+makes tests that agree with the code and are wrong together. The take-up gate
+assumed coupling in order to test FOR coupling, and the fixture inherited the
+same assumption, so both were self-consistent and both were wrong.
+
+
 ### Dashboard: show the real backlash offset
 - `emulator/src/dashboard.cpp` Z-axis status line prints a hardcoded
   `backlash: 0.0` (`toDisplay(0.0)`) instead of the physics model's actual nut
