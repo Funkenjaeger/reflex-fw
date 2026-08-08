@@ -355,6 +355,17 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   // Auto-clear active when enable is deasserted
   if (data->elsStopPreviousEnable && !shared->elsStop.enable) {
     shared->elsStop.active = 0;
+    /* Also abandon any in-flight takeup. This is the escape hatch that makes the
+     * fail-closed Z confirmation gate below recoverable: a takeup withheld for
+     * want of Z confirmation holds takeupPending = 1 indefinitely, which gates
+     * sync off, and nothing else in the ISR clears it. Dropping enable ends the
+     * job, so there is nothing left to confirm and no phase correction worth
+     * applying. Behavior change is confined to the abandoned-mid-takeup case,
+     * which previously completed the takeup and ran applyPhaseCorrection for a
+     * job that no longer exists. */
+    shared->elsStop.takeupPending = 0;
+    shared->elsStop.takeupFault   = 0;
+    data->elsStopSettleCount      = 0;
   }
 
   data->elsStopPreviousEnable = shared->elsStop.enable;
@@ -376,9 +387,102 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
       if (data->elsStopSettleCount < ELS_SETTLE_TICKS) {
         data->elsStopSettleCount++;        // dwell after commanded-complete
       } else {
-        data->elsStopSettleCount = 0;
-        shared->elsStop.takeupPending = 0;
-        applyPhaseCorrection(shared);       // snapshot Z only once settled
+        /* ---- Z CONFIRMATION GATE -------------------------------------------
+         * `takeupReached` above is a PURE COMMANDED-STEP-COUNT CROSSING TEST:
+         * it compares servo.currentSteps against elsStopTakeupTargetSteps, a
+         * target this same firmware computed and assigned at initiation. It
+         * therefore confirms exactly one thing — that the firmware finished
+         * issuing the step pulses it decided to issue. Nothing in it observes
+         * the machine. If the half-nut is open, the servo is disabled or
+         * faulted, or the coupling has slipped, currentSteps crosses the target
+         * on schedule and the firmware reports a completed takeup into thin air.
+         * applyPhaseCorrection then snapshots a Z that reflects a drivetrain
+         * that was never coupled, and the pass indexes into the wrong groove.
+         * ARCHITECTURE.md "Limits" names this exact hole and says there is no
+         * sensor to warn against it. The Z scale IS that sensor; it is already
+         * sampled every ISR tick, and only the comparison was missing.
+         *
+         * (For the record: "wait longer" is NOT the fix. See the ELS_SETTLE_TICKS
+         * comment at the top of this file — a 1 s dwell was tried on the real
+         * machine and changed nothing. Dwelling cannot manufacture evidence.)
+         *
+         * WHY takeupMinZCounts IS A PARAMETER AND NOT backlashSteps IN DISGUISE
+         * --------------------------------------------------------------------
+         * The tempting predicate — "Z must have moved backlashSteps worth of
+         * counts" — is WRONG, and wrong in the unsafe direction: it would refuse
+         * every correctly configured takeup. The whole purpose of the takeup is
+         * to drive the leadscrew ACROSS the lash window, and motion spent inside
+         * that window moves the nut, not the carriage. The emulator's own lash
+         * model (emulator/src/physics.cpp: backlash_offset tracked within
+         * [0, z_backlash_mm], carriage advances only once the nut reaches a wall)
+         * makes the legitimate range explicit. Measured in Z counts projected
+         * onto the takeup direction, a healthy takeup lands anywhere in
+         *
+         *     [ 0 , backlashSteps * zCountsPerPitch / threadPitchSteps ]
+         *
+         * with the low end reached whenever the commanded takeup is fully
+         * absorbed by lash. So the firmware CANNOT derive a lower bound from
+         * geometry it holds: 0 is a legal reading for a healthy machine and also
+         * the reading for a machine that is not connected to anything.
+         *
+         * What makes the gate decidable is an operator choice the firmware
+         * cannot see: size backlashSteps DELIBERATELY LARGER than the measured
+         * lash, and set takeupMinZCounts to the Z counts that deliberate margin
+         * must produce. Then a reading below the minimum means the margin did
+         * not reach metal, which is precisely the unconfirmed-coupling case.
+         * The number is pure machine geometry — the emulator runs 400 counts/mm
+         * on Z against a 4000 counts/rev spindle while the real lathe (elspi) is
+         * 200 counts/mm and 6144 PPR — so any constant baked in here would be
+         * wrong on the machine that matters. It is a Modbus register
+         * (elsStop.takeupMinZCounts) and must be set at the lathe.
+         * elsStop.lastTakeupZDelta reports the observed value every takeup so it
+         * can be chosen empirically rather than guessed.
+         *
+         * takeupMinZCounts == 0 disables the gate and restores byte-for-byte
+         * pre-gate behavior, following the precedent set by elsStop.hysteresis:
+         * an unconfigured field must never change how an existing machine runs.
+         *
+         * WHAT HAPPENS ON FAILURE, AND WHY
+         * --------------------------------
+         * FAIL CLOSED: hold takeupPending = 1, do not call applyPhaseCorrection,
+         * raise elsStop.takeupFault for SW. This is deliberately NOT a hard stop
+         * mid-thread, and the distinction is the whole justification. This code
+         * runs at the START of a pass: elsStop.active has just been cleared, the
+         * takeup move has already consumed servo.stepsToGo, and takeupPending
+         * gates the sync accumulator further down this ISR. So the machine is
+         * standing still with the tool clear of the work, about to BEGIN a cut.
+         * Refusing here declines to start a pass; it does not abandon a tool
+         * buried in a groove. There is no mid-thread hard stop to trade against.
+         *
+         * The alternative is what today's code does: proceed, and feed
+         * applyPhaseCorrection a Z snapshot from a possibly-uncoupled drivetrain.
+         * That produces a confidently wrong correction and drives the next pass
+         * into metal at the wrong index. Between a machine that visibly refuses
+         * to start and a machine that confidently starts in the wrong groove,
+         * the refusal is far the cheaper failure — it costs a puzzled operator,
+         * not a scrapped part or a crash into the shoulder.
+         *
+         * The gate RE-EVALUATES every tick rather than latching dead, so a
+         * takeup whose Z motion is merely late still clears itself; and
+         * elsStopSettleCount is deliberately left at ELS_SETTLE_TICKS while
+         * withheld so no second dwell is imposed once it does. Escape hatch for
+         * a genuinely stuck machine: elsStop.enable 1->0 releases the hold (see
+         * the enable falling-edge block earlier in this ISR). Without that
+         * release, failing closed would be unrecoverable, which would be a worse
+         * defect than the one being fixed. */
+        int32_t zMoved = (shared->scales[shared->elsStop.scaleIndex].position
+                          - data->elsStopTakeupZStart) * data->elsStopTakeupZSign;
+        shared->elsStop.lastTakeupZDelta = zMoved;
+
+        if (shared->elsStop.takeupMinZCounts > 0
+            && zMoved < shared->elsStop.takeupMinZCounts) {
+          shared->elsStop.takeupFault = 1;   /* withhold; takeupPending stays 1 */
+        } else {
+          shared->elsStop.takeupFault   = 0;
+          data->elsStopSettleCount      = 0;
+          shared->elsStop.takeupPending = 0;
+          applyPhaseCorrection(shared);       // snapshot Z only once confirmed
+        }
       }
     }
   }
@@ -486,6 +590,24 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         data->elsStopTakeupTargetSteps = (int32_t)shared->servo.currentSteps + signedTakeup;
         data->elsStopTakeupSign        = (signedTakeup >= 0) ? 1 : -1;
         shared->elsStop.takeupPending  = 1;
+
+        /* Baseline for the Z confirmation gate (see the takeup completion block).
+         * Captured HERE, at initiation, because this is the last instant at which
+         * the carriage is known to be stationary and pre-takeup.
+         *
+         * Expected Z direction = sign(signedTakeup) x sign(dZ per leadscrew step),
+         * where dZ per leadscrew step is zCountsPerPitch / threadPitchSteps. Both
+         * factors are guaranteed non-zero by the enclosing branch condition
+         * (Ramps.c: threadPitchSteps != 0.0f && zCountsPerPitch != 0.0f), so the
+         * sign is well defined. Derived from the live values rather than
+         * hand-simplified, so it stays correct if the cuttingDir derivation above
+         * ever changes. */
+        int32_t zPerStepSign = ((shared->elsStop.zCountsPerPitch > 0.0f)
+                                == (shared->elsStop.threadPitchSteps > 0.0f)) ? 1 : -1;
+        data->elsStopTakeupZStart      = shared->scales[shared->elsStop.scaleIndex].position;
+        data->elsStopTakeupZSign       = (signedTakeup >= 0) ? zPerStepSign : -zPerStepSign;
+        shared->elsStop.lastTakeupZDelta = 0;
+        shared->elsStop.takeupFault      = 0;
       } else {
         applyPhaseCorrection(shared);
       }

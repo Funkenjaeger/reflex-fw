@@ -113,3 +113,16 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_stop_resume_relatch_test m pthread)
 add_test(NAME els_stop_resume_relatch_test COMMAND els_stop_resume_relatch_test)
+
+# POSITIVE CONTROL: backlash-takeup Z confirmation gate.
+# Same link shape as els_stop_resume_relatch_test -- drives the REAL
+# Core/Src/Ramps.c ISR with every external stubbed in the test file, so neither
+# hal_shim.c nor Modbus.c is linked. Proves the gate actually gates: a takeup
+# whose carriage really moves completes, one whose carriage does not move (or
+# moves short) is REFUSED. Those refusal cases are RED against pre-gate
+# firmware, which reported completion on the commanded step count alone.
+add_executable(els_takeup_zconfirm_test
+    ${CMAKE_SOURCE_DIR}/test/els_takeup_zconfirm_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+target_link_libraries(els_takeup_zconfirm_test m pthread)
+add_test(NAME els_takeup_zconfirm_test COMMAND els_takeup_zconfirm_test)

@@ -110,6 +110,13 @@ typedef struct {
   float    lastActualAdvance; // READ-ONLY (firmware-owned): last resume's deltaZ × threadPitchSteps / zCountsPerPitch
   float    lastPhaseError;    // READ-ONLY (firmware-owned): last resume's idealAdvance − actualAdvance (pre-modulo)
   float    lastCorrection;    // READ-ONLY (firmware-owned): last resume's correction added to stepsToGo (post-modulo)
+  /* --- Backlash-takeup Z confirmation gate. APPENDED AT THE TAIL of elsStop_t,
+   * which is itself the last member of rampsSharedData_t, so every pre-existing
+   * Modbus register offset is unchanged; reflex-ui keeps working untouched and
+   * simply does not know these registers exist yet. */
+  int32_t  takeupMinZCounts;  // SW write: MACHINE-SPECIFIC. Minimum Z-scale motion in encoder counts, projected onto the takeup direction, that must be observed across the backlash takeup before it may be reported complete. 0 = gate DISABLED (byte-for-byte pre-gate behavior). NOT derivable from backlashSteps — see the derivation in the takeup completion block of Core/Src/Ramps.c. Set at the lathe from observed lastTakeupZDelta
+  int32_t  lastTakeupZDelta;  // READ-ONLY (firmware-owned): Z counts moved across the last evaluated takeup, projected onto the takeup direction (negative = carriage moved the WRONG way). Diagnostic for choosing takeupMinZCounts empirically
+  uint16_t takeupFault;       // READ-ONLY (firmware-owned): 1 while a takeup is being WITHHELD because takeupMinZCounts was not met (takeupPending stays 1 and sync stays gated); 0 otherwise
 } elsStop_t;
 
 typedef struct {
@@ -142,6 +149,8 @@ typedef struct {
   int32_t  elsStopTakeupTargetSteps;  // servo.currentSteps target value at end of post-resume backlash takeup
   int32_t  elsStopTakeupSign;         // direction of the takeup move (+1/-1); completion is a crossing test, not exact equality
   int32_t  elsStopSettleCount;        // ticks elapsed since takeup commanded-complete; dwell before phase-correction Z snapshot
+  int32_t  elsStopTakeupZStart;       // scales[elsStop.scaleIndex].position captured at takeup INITIATION; the baseline the Z confirmation gate measures against
+  int32_t  elsStopTakeupZSign;        // +1/-1: sign the Z scale should move in for this takeup; sign(signedTakeup) x sign(zCountsPerPitch / threadPitchSteps)
   uint16_t elsStopHysteresisCleared;  // 1 once the axis has cleared stopPosition by >= elsStop.hysteresis counts; cleared when firmware latches active = 1
 } rampsHandler_t;
 
