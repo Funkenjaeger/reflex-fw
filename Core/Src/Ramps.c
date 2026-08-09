@@ -239,8 +239,20 @@ void RampsStart(rampsHandler_t *rampsData) {
   rampsData->shared.elsStop.takeupPending = 0;
   /* Register-layout version. Bump this whenever elsStop_t / rampsSharedData_t
    * changes shape; reflex-ui reads it at connect so a firmware/UI map mismatch
-   * reports itself by name instead of surfacing as garbled register reads. */
-  rampsData->shared.elsStop.protocolVersion = 2;
+   * reports itself by name instead of surfacing as garbled register reads.
+   *
+   * 3 (2026-08-16): latchCommand/latchSeq appended for the manual reference
+   * latch. BOTH parents of this rebase called themselves 2 and meant different
+   * maps -- dev-staging's 2 ends at diagReserved[4], the pre-rebase
+   * feat/els-thread-resync's 2 ended at latchSeq with no diagnostic block at
+   * all. Leaving it at 2 would give three distinct layouts one version number,
+   * which is precisely the silent-garbage failure this field exists to prevent.
+   *
+   * The new pair is appended AFTER the diagnostic scratchpad on purpose, so
+   * every offset that has been exercised on the lathe -- the whole diag block
+   * included -- keeps the address it was verified at. Only genuinely new
+   * registers move. */
+  rampsData->shared.elsStop.protocolVersion = 3;
   /* Diagnostic scratchpad. diagSchema is the ONLY thing that tells a reader what
    * the rest of the block means, so it is set here in BOTH configurations —
    * explicitly zeroed when no probe is compiled in, rather than left to whatever
@@ -267,6 +279,8 @@ void RampsStart(rampsHandler_t *rampsData) {
 #endif
   rampsData->shared.elsStop.calCommand   = 0;
   rampsData->shared.elsStop.calSeq       = 0;
+  rampsData->shared.elsStop.latchCommand = 0;
+  rampsData->shared.elsStop.latchSeq     = 0;
   rampsData->shared.elsStop.calResult    = ELS_CAL_OK;
   rampsData->shared.elsStop.takeupResult = ELS_CAL_OK;
   rampsData->shared.elsStop.takeupSeq    = 0;
@@ -622,6 +636,25 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   }
 
   data->elsStopPreviousEnable = shared->elsStop.enable;
+
+  /* Manual reference latch (interactive re-sync to an existing thread). Same
+   * command/ack split as calCommand: consumed and cleared in one ISR pass so a
+   * host-side two-register write can never be seen half-applied, and the pair is
+   * captured in the same tick so spindle and Z are coherent. Only meaningful
+   * inside a job — outside one the reference would be wiped on the next enable
+   * 0->1 edge, so a latch while disabled is consumed WITHOUT the latchSeq ack
+   * and the host reads the missing edge as the refusal. Setting referenceLatched
+   * is also what suppresses the first-trigger auto-latch for the rest of the
+   * job: the trigger block only captures while referenceLatched == 0. */
+  if (shared->elsStop.latchCommand != 0u) {
+    shared->elsStop.latchCommand = 0u;
+    if (shared->elsStop.enable != 0u) {
+      shared->elsStop.latchedZ         = shared->scales[shared->elsStop.scaleIndex].position;
+      shared->elsStop.latchedSpindle   = shared->scales[0].position;
+      shared->elsStop.referenceLatched = 1;
+      shared->elsStop.latchSeq++;
+    }
+  }
 
   // Detect completion of post-resume backlash takeup move, dwell for the servo
   // to settle, CONFIRM THE CARRIAGE ACTUALLY MOVED, then apply phase correction.
