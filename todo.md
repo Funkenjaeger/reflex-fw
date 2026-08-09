@@ -150,6 +150,33 @@ instead of leaving bare `TODO:` comments in code.
 
 ---
 
+## ELS interactive re-sync: manual reference latch (2026-08-08)
+
+### Landed (branch feat/els-thread-resync)
+- `latchCommand`/`latchSeq` appended to `elsStop_t` (96 -> 100 bytes,
+  `rampsSharedData_t` 304 -> 308, `protocolVersion` 1 -> 2, reflex-ui
+  `devices.py` + `KNOWN_ROOT_SIZE` moved in lockstep). Same command/ack
+  contract as `calCommand`/`calSeq`; a latch with `enable == 0` is consumed
+  with NO seq increment (absent ack = refusal).
+- ISR consumes the command in one pass: captures `latchedSpindle`/`latchedZ`
+  coherently, sets `referenceLatched` (which is what suppresses the
+  first-trigger auto-latch), acks via `latchSeq`. Mechanism only — fresh-job
+  policy lives in the reflex-ui wizard.
+- `els_manual_latch_test` (ISR-level, mutation-proven ×4) and reflex-ui's
+  `tests/system/test_els_thread_resync.py` (emulator end-to-end: 3 passes,
+  mid-cut phase residual spread 1.4 steps on a 400-step pitch).
+
+### NOT proven on hardware
+- Emulator + host tests only: no servo dynamics, no Modbus timing, no metal.
+- The elspi verification is a real re-chucked threaded part (TickTick task
+  6a768a98 checklist item 8): jog into the thread, hand-seat, latch, AIR PASS
+  first, then confirm passes chase the existing groove.
+- The 1–3 count Z-hold tolerance and the spindle stillness dwell (~0.7 s,
+  ±1 count) have never been exercised against real scale jitter — elspi's Z
+  is 200 counts/mm, half the emulator's resolution.
+
+---
+
 ## Emulator
 
 ### Model manual carriage movement with the half-nut open (TEST-INFRASTRUCTURE GAP)

@@ -134,3 +134,16 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_stop_resume_relatch_test m pthread)
 add_test(NAME els_stop_resume_relatch_test COMMAND els_stop_resume_relatch_test)
+
+# Manual reference latch (interactive re-sync to an existing thread). Same stub
+# strategy as the relatch test: links the real Ramps.c, stubs every external.
+# Covers the latchCommand/latchSeq command/ack contract: atomic consume,
+# auto-latch suppression via referenceLatched, refusal (no ack) outside a job,
+# and the resume path measuring from the manual datum.
+add_executable(els_manual_latch_test
+    ${CMAKE_SOURCE_DIR}/test/els_manual_latch_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_manual_latch_test m pthread)
+add_test(NAME els_manual_latch_test COMMAND els_manual_latch_test)

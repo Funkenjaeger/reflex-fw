@@ -121,6 +121,23 @@ A pass has three logical phases:
 - **Trigger.** When the Z scale crosses the stop position in the configured direction, the firmware atomically sets `active = 1` (gating sync off) and, on the *first* such trigger of the job, latches a reference pair: the spindle position and the Z position at that instant. Subsequent triggers in the same job set `active = 1` but do not re-latch — the original reference is what defines this job's thread.
 - **Resume.** Software clears `active` when the operator is ready to start the next pass. This 1→0 transition is where the re-sync math runs.
 
+#### Manual reference latch (re-sync to an existing thread)
+
+The first-trigger auto-latch is not special in itself — it is merely a moment
+when the carriage is known to sit on the correct side of the leadscrew lash.
+`latchCommand` lets the host request the *same* capture at an operator-chosen
+point (a tool physically seated in an existing thread's groove, lash loaded by
+a cutting-direction jog), so a re-chucked or foreign thread can be picked up.
+The ISR consumes the command in one pass — capturing `latchedSpindle` and
+`latchedZ` coherently and setting `referenceLatched`, which is exactly the
+guard that suppresses the auto-latch for the rest of the job — and acks by
+incrementing `latchSeq`. A latch requested with `enable == 0` is consumed with
+*no* ack: the reference would be wiped on the next `enable` 0→1 edge anyway,
+and the missing seq edge is how the host reads the refusal. Everything
+downstream of the latch is unchanged and unaware of which producer latched.
+The operator procedure, the Z-watch tolerance rationale, and the wizard live
+in reflex-ui (`reflex/fsms/els_resync.py`, `reflex/help/els_thread_resync.md`).
+
 #### Re-sync mechanism
 
 Between the trigger and the resume, the operator can do almost anything — jog the carriage electronically, open the half-nut, hand-wheel the carriage to a different location, snap the half-nut closed at a thread-incompatible position. The spindle keeps rotating freely throughout. By the time `active` clears, the carriage may be anywhere, and the leadscrew may be anywhere relative to where pure uninterrupted sync would have placed it.
@@ -240,7 +257,7 @@ open-loop behaviour on every uncommissioned machine.
 
 Configuration (SW write): `enable`, `scaleIndex`, `stopPosition`, `stopDirection`, `threadPitchSteps`, `zCountsPerPitch`, `backlashSteps`, `hysteresis`, `calCeilingSteps`, `calMotionThreshCounts`.
 
-Command (bidirectional, firmware clears on consume): `calCommand`.
+Command (bidirectional, firmware clears on consume): `calCommand`, `latchCommand`.
 
 State (firmware-owned, except `active` which is bidirectional): `active`, `latchedZ`, `latchedSpindle`, `referenceLatched`, `takeupPending`, `protocolVersion`.
 
@@ -248,12 +265,17 @@ Per-resume diagnostics: `lastIdealAdvance`, `lastActualAdvance`, `lastPhaseError
 
 Calibration / take-up outcomes: `calSeq`, `calResult`, `calMeasured[3]`, `takeupSeq`, `takeupResult`, `lastTakeupZDelta`.
 
-`calSeq` and `takeupSeq` are monotonic outcome counters, not flags — `calCommand`
-is cleared the instant the ISR consumes it, long before a run finishes, so a host
-polling the command for completion would read a stale result. Edge-detect the
-sequence counters.
+Manual latch ack: `latchSeq` (increments only on an *accepted* latch — a latch
+with `enable == 0` is consumed with no increment, so the absent edge is the
+refusal).
 
-`protocolVersion` names this register layout (currently **1**). Bump it whenever
+`calSeq`, `takeupSeq`, and `latchSeq` are monotonic outcome counters, not flags —
+the command registers are cleared the instant the ISR consumes them, long before
+any result is observable, so a host polling a command for completion would read
+a stale result. Edge-detect the sequence counters.
+
+`protocolVersion` names this register layout (currently **2**; the manual-latch
+pair `latchCommand`/`latchSeq` is the 1→2 append). Bump it whenever
 `rampsSharedData_t` changes shape; reflex-ui checks it at connect so a
 firmware/UI mismatch reports itself by name instead of surfacing as plausible
 garbage in every register past the point of divergence.
