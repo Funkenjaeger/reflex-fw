@@ -38,6 +38,19 @@ public:
     enum HalfNutState { DISENGAGED, ENGAGING, ENGAGED };
 
     void requestHalfNutToggle();
+
+    /* Explicit-state request, for callers that know the state they want rather
+     * than the transition they want (the stdin command channel; system tests).
+     *
+     * IDEMPOTENT, and that is the entire reason it exists rather than callers
+     * poking requestHalfNutToggle() twice: a toggle issued while an engage is
+     * still waiting for phase alignment CANCELS it (see requestHalfNutToggle),
+     * so "close it" expressed as a toggle is state-dependent and would
+     * sometimes mean "give up". A test that has to know the current state in
+     * order to ask for the next one is a test that can silently ask for the
+     * opposite. */
+    void setHalfNutEngaged(bool engaged);
+
     HalfNutState getHalfNutState() const { return half_nut_state; }
 
     /* --- Carriage (Z-axis) manual move --- */

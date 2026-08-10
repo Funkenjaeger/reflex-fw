@@ -279,12 +279,40 @@ static void runElsScenario(LathePhysics *physics, rampsHandler_t *rampsData,
  * the cutting side of it). Override the retract distance via EMU_RETRACT_MM.
  */
 /*
- * Serve-mode stdin command channel: gives system tests a way to move the
- * X (cross-slide) axis mid-test without a new Modbus register. One command
- * per line, whitespace-separated:
+ * Serve-mode stdin command channel: gives system tests a way to drive the
+ * machine's MANUAL degrees of freedom mid-test without inventing a Modbus
+ * register for each one. One command per line, whitespace-separated:
  *
- *   x move <mm>        -> physics->moveCrossSlideTo(mm)
+ *   x move <mm>         -> physics->moveCrossSlideTo(mm)
  *   x jog <-1|0|1>      -> physics->jogCrossSlide(dir)
+ *   z move <mm>         -> physics->moveCarriageTo(mm)
+ *   z jog <-1|0|1>      -> physics->jogCarriage(dir)
+ *   halfnut open        -> physics->setHalfNutEngaged(false)
+ *   halfnut close       -> physics->setHalfNutEngaged(true)
+ *
+ * WHY THE Z AND HALFNUT COMMANDS EXIST
+ * ------------------------------------
+ * Together they are the third machine state the emulator could not previously
+ * represent: UNCOUPLED BUT MOVING ANYWAY. The model had exactly two worlds --
+ * coupled (Z follows the leadscrew) and uncoupled (Z never moves) -- while a
+ * real lathe has a third, because the operator can push the carriage with the
+ * half-nut open. That is not a corner case here: the whole ELS stop/resume
+ * model is built on hand-cranking between passes.
+ *
+ * Its absence is why the 2026-08-08 take-up gate defect shipped with passing
+ * tests. A fixture that cannot express a failure produces tests that agree with
+ * the code and are wrong together. See reflex-fw/todo.md.
+ *
+ * The z branch adds NO new coupling logic: LathePhysics::moveCarriageTo() /
+ * jogCarriage() already refuse to move the carriage while the half-nut is
+ * ENGAGED, so "only valid while the nut is open" is enforced inside the physics
+ * model, not here.
+ *
+ * halfnut takes an explicit STATE (open/close), not a toggle, and the
+ * distinction is load-bearing rather than cosmetic: a toggle issued while an
+ * engage is waiting for phase alignment CANCELS it, so a toggle-shaped command
+ * means different things depending on state the test cannot see. setHalfNutEngaged()
+ * is idempotent; `halfnut close` never means "give up".
  *
  * Runs on its own thread (same pattern as isrThreadFunc) because
  * runPhysicsServer's loop can block for several seconds inside the
@@ -297,30 +325,46 @@ static void stdinCommandThreadFunc(LathePhysics *physics) {
     std::string line;
     while (std::getline(std::cin, line)) {
         std::istringstream iss(line);
-        std::string axis, verb;
-        iss >> axis >> verb;
+        std::string noun, verb;
+        iss >> noun >> verb;
 
-        if (axis != "x") {
+        if (noun == "halfnut") {
+            if (verb == "open" || verb == "close") {
+                physics->setHalfNutEngaged(verb == "close");
+                emu_log_event("stdin cmd: halfnut %s", verb.c_str());
+            } else {
+                emu_log_event("stdin cmd: malformed 'halfnut' verb '%s' "
+                              "(want open|close) (line: \"%s\")",
+                              verb.c_str(), line.c_str());
+            }
+            continue;
+        }
+
+        if (noun != "x" && noun != "z") {
             emu_log_event("stdin cmd: unknown axis '%s' (line: \"%s\")",
-                          axis.c_str(), line.c_str());
+                          noun.c_str(), line.c_str());
             continue;
         }
 
         if (verb == "move") {
             double mm;
             if (iss >> mm) {
-                physics->moveCrossSlideTo(mm);
-                emu_log_event("stdin cmd: x move %.4f", mm);
+                if (noun == "x") physics->moveCrossSlideTo(mm);
+                else             physics->moveCarriageTo(mm);
+                emu_log_event("stdin cmd: %s move %.4f", noun.c_str(), mm);
             } else {
-                emu_log_event("stdin cmd: malformed 'x move' (line: \"%s\")", line.c_str());
+                emu_log_event("stdin cmd: malformed '%s move' (line: \"%s\")",
+                              noun.c_str(), line.c_str());
             }
         } else if (verb == "jog") {
             int dir;
             if ((iss >> dir) && (dir == -1 || dir == 0 || dir == 1)) {
-                physics->jogCrossSlide(dir);
-                emu_log_event("stdin cmd: x jog %d", dir);
+                if (noun == "x") physics->jogCrossSlide(dir);
+                else             physics->jogCarriage(dir);
+                emu_log_event("stdin cmd: %s jog %d", noun.c_str(), dir);
             } else {
-                emu_log_event("stdin cmd: malformed 'x jog' (line: \"%s\")", line.c_str());
+                emu_log_event("stdin cmd: malformed '%s jog' (line: \"%s\")",
+                              noun.c_str(), line.c_str());
             }
         } else {
             emu_log_event("stdin cmd: unknown verb '%s' (line: \"%s\")", verb.c_str(), line.c_str());

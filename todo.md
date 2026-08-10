@@ -215,16 +215,35 @@ motion that the servo did not cause.
   the same defect shape, in the code path that produces the numbers the take-up
   gate is then judged against. `elsSlipTick()` is the primitive it needs; the
   accumulator is currently only fed while `takeupPending`.
-- STILL OPEN: an external carriage-displacement input to `LathePhysics` — a
-  nudge/jog the test or dashboard can apply independently of the servo, valid
-  only while the half-nut is open (with it closed the carriage is captive).
-  Needed for the SYSTEM-level (PTY) regression that drives this the way reflex-ui
-  really does; the fixture-level proof above does not depend on it. The staged
-  `z move`/`z jog` patch covers the carriage-motion half already; what is missing
-  is the half-nut state, which serve mode force-engages at boot for **any**
-  `EMU_SCENARIO` value. **Command name decided 2026-08-10: `halfnut open` /
-  `halfnut close`** — explicit state rather than a toggle, so a test can assert
-  the state it wants without tracking what it was.
+- ~~An external carriage-displacement input to `LathePhysics`~~ — DONE
+  2026-08-10. The serve-mode stdin channel (`emulator/src/main.cpp`) gained
+  `z move <mm>` / `z jog <-1|0|1>` and `halfnut open` / `halfnut close`.
+  Together they express the third state: **uncoupled but moving anyway**.
+  `moveCarriageTo`/`jogCarriage` already refuse while the nut is ENGAGED, so
+  the "only valid with the nut open" rule stays inside the physics model.
+
+  `halfnut` takes an explicit STATE, not a toggle, and the distinction is
+  load-bearing: a toggle issued while an engage is waiting for phase alignment
+  CANCELS it, so a toggle-shaped command means different things depending on
+  state a test cannot see. `LathePhysics::setHalfNutEngaged()` is idempotent;
+  `els_halfnut_test` T8 pins all four transitions, and the naive
+  "toggle if it disagrees" implementation reddens 6 of its assertions.
+
+  Serve mode still force-engages the nut at boot for **any** `EMU_SCENARIO`
+  value — deliberately left alone. A test that wants the nut open now says so,
+  which keeps every existing scenario working unchanged.
+
+- ~~SYSTEM-level regression~~ — DONE 2026-08-10, and it lives in the OTHER
+  repo: `reflex-ui/tests/system/test_els_takeup_attribution.py`. Runs the real
+  operator cycle (cut a pass → stop → retract → open the nut → press Cut) and
+  shoves the carriage mid-window. Mutation-proven: reverting the firmware gate
+  to the endpoint comparison reddens the refusal case while the coupled
+  positive control stays green.
+
+  Note for whoever moves this next: the take-up does NOT run on the first cut.
+  The resume path needs `referenceLatched`, which the FIRMWARE sets at a real
+  stop trigger — so a take-up always has a completed pass in front of it. That
+  is also precisely the situation the 2026-08-08 defect occurred in.
 
 **Design note for whoever does this:** a fixture that cannot express a failure
 makes tests that agree with the code and are wrong together. The take-up gate
