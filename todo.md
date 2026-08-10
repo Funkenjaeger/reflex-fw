@@ -148,6 +148,31 @@ instead of leaving bare `TODO:` comments in code.
   and deliberate, but confirm the real magnitude on metal before tuning the
   margin floor down.
 
+### Commission `ELS_SLIP_SETTLE_TICKS` on elspi (UNMEASURED PARAMETER)
+
+Motion attribution (`Core/Inc/els_slip.h`) replaced the 250 ms confirmation
+window as the thing that actually bounds the 2026-08-08 exposure. The number
+that bound is now made of — `ELS_SLIP_SETTLE_TICKS` in `Ramps.c`, currently
+**1000 ticks (~10 ms at the 100 kHz ISR rate)** — has never been measured on the
+machine, and **cannot be measured in the emulator**: its lash model moves the
+carriage instantaneously with the pulse, so it has no settle behaviour at all.
+The value there satisfies the structural constraints (above `ELS_SETTLE_TICKS`,
+above pulse pacing) and nothing more.
+
+To commission it: run a real take-up at the take-up speed actually in use and
+watch how long Z counts keep arriving after the last commanded pulse. Set the
+horizon just above that. Tune it **down** from 1000 against a machine that still
+confirms reliably — never up to make a refusal go away, since the horizon is
+exactly the interval in which a hand nudge is still accepted as evidence.
+
+Two unit traps, both live (full list in `els_slip.h`):
+- **Ticks, not milliseconds.** The emulator's real-time serve loop drives the
+  same ISR ~10x slower than hardware (`emulator/src/main.cpp`), so a horizon
+  chosen by wall-clock there is 10x wrong on the lathe.
+- **200 vs 400 counts/mm.** The horizon itself is a time quantity and so is
+  resolution-independent, but any *counts* threshold eyeballed off emulator
+  output is 2x wrong on elspi.
+
 ---
 
 ## Emulator
@@ -175,13 +200,28 @@ open. No test could express that, because the model has no input for carriage
 motion that the servo did not cause.
 
 **Needed:**
-- An external carriage-displacement input to `LathePhysics` — a nudge/jog the
-  test or dashboard can apply independently of the servo, valid only while the
-  half-nut is open (with it closed the carriage is captive).
-- The same degree of freedom in the unit-test `Lash` fixture, so ISR-level tests
-  can inject motion mid-take-up and mid-calibration.
-- Regression cases: a withheld take-up must NOT be satisfied by hand motion; a
-  calibration leg must not be satisfied by it either.
+- ~~The same degree of freedom in the unit-test `Lash` fixture~~ — DONE.
+  `Rig::nudgeCarriage()` injects carriage motion the servo did not cause,
+  independently of the serve-mode command channel.
+- ~~Regression case: a withheld take-up must NOT be satisfied by hand motion~~ —
+  DONE, and it is what pins motion attribution: `els_takeup_confirm_test.cpp`
+  now runs an identical 20-count shove twice inside the same open window, once
+  ~50 ticks after the last pulse (confirms — inertia) and once 5000 ticks after
+  (refused — a handwheel). Mutation-proven selective: disabling attribution
+  reddens the second and leaves the first green.
+- STILL OPEN: **a calibration leg must not be satisfied by hand motion either.**
+  `elsCalUpdate()` still uses the bare `elsZMotionSeen()` endpoint test, so a
+  nudge during a measurement leg is indistinguishable from lash being crossed —
+  the same defect shape, in the code path that produces the numbers the take-up
+  gate is then judged against. `elsSlipTick()` is the primitive it needs; the
+  accumulator is currently only fed while `takeupPending`.
+- STILL OPEN: an external carriage-displacement input to `LathePhysics` — a
+  nudge/jog the test or dashboard can apply independently of the servo, valid
+  only while the half-nut is open (with it closed the carriage is captive).
+  Needed for the SYSTEM-level (PTY) regression that drives this the way reflex-ui
+  really does; the fixture-level proof above does not depend on it. Blocked on
+  naming the serve-mode half-nut toggle command (see `6a77c391`); the staged
+  `z move`/`z jog` patch covers the carriage-motion half already.
 
 **Design note for whoever does this:** a fixture that cannot express a failure
 makes tests that agree with the code and are wrong together. The take-up gate

@@ -62,8 +62,47 @@
  * (sub-millimetre moves, heavy carriage, high friction) and well below the time
  * it takes a person to reach a handwheel. It bounds the exposure; it does not
  * eliminate it — only correlating Z motion against commanded steps does that,
- * and that is the real fix (see todo.md). */
+ * and that is the real fix (see todo.md).
+ *
+ * THAT FIX NOW EXISTS (els_slip.h), and it changed what this constant is FOR.
+ * The window no longer carries the safety property — attribution does. What is
+ * left here is purely RECOVERY LATENCY: how long the gate keeps re-evaluating a
+ * late-but-genuine take-up before giving up and aborting the pass. It can stay
+ * generous precisely because a hand nudge inside it no longer counts as
+ * evidence. Shortening it would only make the machine give up sooner. */
 #define ELS_TAKEUP_CONFIRM_WINDOW_TICKS 25000
+
+/* Mechanical settle allowance for motion attribution: how long after a commanded
+ * step pulse Z motion may still be credited to the servo rather than to whatever
+ * else moved the carriage. This is the constant that replaces the 250 ms window
+ * as the actual exposure bound, so it is the number an attacker — or an
+ * unlucky operator — has to hit.
+ *
+ * THIS VALUE IS NOT COMMISSIONED. It is a starting point chosen to satisfy the
+ * constraints below, not a measurement of elspi's drivetrain, and it CANNOT be
+ * derived from the emulator: the emulator's lash model moves the carriage
+ * instantaneously with the pulse, so it has no settle behaviour to measure at
+ * all. Measuring it means watching real Z counts arrive after the last pulse of
+ * a real take-up, on the machine, at the take-up speed actually in use.
+ *
+ * Constraints any replacement value must satisfy:
+ *  - MUST exceed ELS_SETTLE_TICKS (50). The gate's first evaluation happens that
+ *    many ticks after the last pulse; a shorter horizon rejects the inertial
+ *    settle this whole mechanism exists to accept.
+ *  - MUST exceed the live pulse pacing period (servoCycles), or genuine coupled
+ *    motion mid-burst is discarded and a HEALTHY machine refuses to start. Not
+ *    left to this constant — elsSlipSettleTicks() floors it at runtime — but a
+ *    value below the pacing period means that floor is doing all the work and
+ *    the number here is decorative.
+ *  - Ticks, not milliseconds. At the ~100 kHz hardware ISR rate 1000 ticks is
+ *    ~10 ms. The emulator's real-time serve loop runs the same ISR ~10x slower,
+ *    so anything tuned by watching wall-clock there is 10x wrong here
+ *    (els_slip.h has the full unit-trap list).
+ *
+ * Smaller is safer and only becomes unsafe in one direction: too small starts
+ * refusing healthy take-ups. Tune it DOWN from here against a machine that still
+ * confirms reliably, never up to make a refusal go away. */
+#define ELS_SLIP_SETTLE_TICKS 1000
 
 #ifdef EMULATOR_BUILD
 #include "emulator_state.h"
@@ -591,8 +630,24 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
             shared->elsStop.zCountsPerPitch,
             shared->elsStop.calMotionThreshCounts);
 
-        if (elsZMotionSeen(zNow, data->elsStopTakeupZStart,
-                           shared->elsStop.takeupThreshCounts)) {
+        /* ATTRIBUTED motion only. lastTakeupZDelta above still reports the raw
+         * endpoint delta — it is the wrong-way diagnostic and the number the UI
+         * shows — but the endpoint comparison is NOT what decides any more.
+         *
+         * The endpoint delta cannot tell "the drivetrain moved the carriage"
+         * from "something else moved the carriage during the same 250 ms", and
+         * on 2026-08-08 a hand nudge with the half-nut open exploited exactly
+         * that. elsSlipConfirmed() counts only the Z counts that arrived while
+         * the servo was driving or settling from a pulse (els_slip.h), which is
+         * evidence of coupling rather than merely evidence of motion.
+         *
+         * Same floor, same fail-closed convention, same `>=`: this is a
+         * strictly SMALLER numerator against an unchanged threshold, so nothing
+         * that was refused before is confirmed now. Read els_slip.h on why this
+         * narrows the exposure without closing it — a nudge landing inside the
+         * settle horizon of a real pulse is still indistinguishable, and no
+         * amount of arithmetic here changes that. */
+        if (elsSlipConfirmed(&data->elsSlip, shared->elsStop.takeupThreshCounts)) {
           if (shared->elsStop.takeupResult != ELS_CAL_OK) {
             shared->elsStop.takeupResult = ELS_CAL_OK;
           }
@@ -775,6 +830,12 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
         /* Baseline for the Z confirmation gate. Captured at INITIATION, before
          * any pulses are issued, so the gate measures the whole takeup. */
         data->elsStopTakeupZStart      = shared->scales[shared->elsStop.scaleIndex].position;
+        /* Same instant, same reason, for the attribution accumulator: it must
+         * cover the whole take-up. It starts credited with nothing and stays
+         * that way until the first pulse fires (els_slip.h), so the Z motion of
+         * this initiation tick — which physically predates the take-up — cannot
+         * be counted as evidence for it. */
+        elsSlipReset(&data->elsSlip);
         data->elsStopTakeupTicks       = 0;
         data->elsStopTakeupLatched     = 0;
         shared->elsStop.takeupResult   = ELS_CAL_OK;
@@ -804,6 +865,16 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   if (shared->fastData.servoMode == 1) updateIndexingPosition(data);
   if (shared->fastData.servoMode == 2) updateJogPosition(data);
 
+  /* Bracket the pulse generator to recover THIS TICK's signed commanded step
+   * delta. The generator's own `direction` is a local that dies at the end of
+   * the block, and it is set to 1 even on ticks that emit nothing (it doubles as
+   * the DIR pin state), so it is not the quantity wanted here. Differencing the
+   * counter the generator actually writes is: it is -1/0/+1 by construction, it
+   * cannot disagree with the pulses emitted, and it needs no new state. Unsigned
+   * wraparound is intentional and well-defined — the ±1 survives the round
+   * trip. */
+  uint32_t servoStepsBeforePulse = shared->servo.currentSteps;
+
   if (shared->fastData.servoMode != 0 && servoCyclesCounter == 0) {
     int32_t change = (int32_t)(shared->servo.desiredSteps) - (int32_t)shared->servo.currentSteps;
     // generate pulses to reach desired position with the motor
@@ -831,6 +902,31 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
     }
 
     data->servoPreviousDirection = direction;
+  }
+
+  /* MOTION ATTRIBUTION — and the placement is the whole trick.
+   *
+   * This is the ONLY point in the ISR where this tick's Z delta and this tick's
+   * commanded step delta are both fresh. The confirmation gate above runs at the
+   * TOP of the pass, before the scale-refresh loop and long before this block,
+   * so a per-tick correlation computed up there would pair LAST tick's Z against
+   * THIS tick's pulse — a stale correlation that would look like it worked, and
+   * would quietly mis-attribute exactly the motion it exists to judge.
+   *
+   * Cost of that ordering: the accumulator the gate reads is one tick behind,
+   * the same 10 us staleness the gate already had against its own Z sample. It
+   * is noise against a 250 ms window and against any settle horizon worth
+   * setting.
+   *
+   * dZ is taken already signed by scaleDir, matching how scales[].position is
+   * accumulated in the refresh loop, so attribution and the endpoint diagnostic
+   * agree about which way the carriage went. */
+  if (shared->elsStop.takeupPending) {
+    uint16_t zIdx   = shared->elsStop.scaleIndex;
+    int32_t  dZ     = data->scalesDeltaPos[zIdx].delta * shared->scales[zIdx].scaleDir;
+    int32_t  dServo = (int32_t)(shared->servo.currentSteps - servoStepsBeforePulse);
+    elsSlipTick(&data->elsSlip, dZ, dServo,
+                elsSlipSettleTicks(ELS_SLIP_SETTLE_TICKS, (int32_t)servoCycles));
   }
 
   /* Divide-by-zero guard. The zero window is REACHABLE, not theoretical:

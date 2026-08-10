@@ -86,6 +86,16 @@ target_include_directories(els_backlash_cal_test PRIVATE ${CMAKE_SOURCE_DIR}/../
 target_link_libraries(els_backlash_cal_test m)
 add_test(NAME els_backlash_cal_test COMMAND els_backlash_cal_test)
 
+# Motion attribution (Core/Inc/els_slip.h): which Z counts arrived while the
+# servo was actually driving. Header-only, same shape as the cal test. Drives
+# the accumulator tick by tick, which is the ONLY place the settle horizon's
+# timing properties are reachable — the ISR fixture's lash model responds to a
+# pulse instantly, so every horizon behaves identically there.
+add_executable(els_slip_test ${CMAKE_SOURCE_DIR}/test/els_slip_test.cpp)
+target_include_directories(els_slip_test PRIVATE ${CMAKE_SOURCE_DIR}/../Core/Inc)
+target_link_libraries(els_slip_test m)
+add_test(NAME els_slip_test COMMAND els_slip_test)
+
 # Half-nut engagement physics tests: exercise LathePhysics directly. Links
 # physics.cpp + config.cpp (EmuConfig ctor); the test file stubs the shim
 # externals (emu_hw, emu_log_event, emu_update_timer_counters), so hal_shim.c
