@@ -219,9 +219,12 @@ motion that the servo did not cause.
   nudge/jog the test or dashboard can apply independently of the servo, valid
   only while the half-nut is open (with it closed the carriage is captive).
   Needed for the SYSTEM-level (PTY) regression that drives this the way reflex-ui
-  really does; the fixture-level proof above does not depend on it. Blocked on
-  naming the serve-mode half-nut toggle command (see `6a77c391`); the staged
-  `z move`/`z jog` patch covers the carriage-motion half already.
+  really does; the fixture-level proof above does not depend on it. The staged
+  `z move`/`z jog` patch covers the carriage-motion half already; what is missing
+  is the half-nut state, which serve mode force-engages at boot for **any**
+  `EMU_SCENARIO` value. **Command name decided 2026-08-10: `halfnut open` /
+  `halfnut close`** — explicit state rather than a toggle, so a test can assert
+  the state it wants without tracking what it was.
 
 **Design note for whoever does this:** a fixture that cannot express a failure
 makes tests that agree with the code and are wrong together. The take-up gate
