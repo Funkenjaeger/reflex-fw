@@ -1,0 +1,65 @@
+name: Test
+
+# No branch filter, deliberately.
+#
+# reflex-fw's only other workflow, release.yaml, triggers on main + dev -- the
+# two branches that cut releases. Those are exactly the two branches that have
+# never run a test. Filtering this workflow to the "development" branches would
+# reproduce that gap in a new file, so it runs everywhere: main, dev,
+# dev-staging, integration and every feature branch.
+#
+# Note this means a PR from a branch in this repo produces two runs (one for
+# the push event, one for the pull_request event). That is accepted: branch
+# protection keys off the pull_request run, and the suite costs ~30s.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref; the newest head always runs to
+# completion, so a required check is never left resolved by a stale run.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Builds emulator/ and runs its ctest suite.
+  #
+  # This job is intended to be a REQUIRED check, so it deliberately has NO
+  # escape hatch: no continue-on-error, no `|| true`, no soft-failing step,
+  # and no cross-repo checkout that could fail for reasons unrelated to this
+  # repo's source. If it is green, the emulator suite genuinely passed.
+  ctest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+        # ubuntu-latest ships both already; installed explicitly as insurance
+        # against runner-image drift. emulator/CMakeLists.txt links only
+        # pthread and m, both part of the standard toolchain, so nothing else
+        # is required.
+
+      - name: Configure
+        run: cmake -S emulator -B emulator/build
+
+      - name: Build
+        run: cmake --build emulator/build
+
+      # --no-tests=error matters: the number of ctest targets differs sharply
+      # by branch (main defines ZERO, dev defines one, dev-staging four,
+      # integration six). Without this flag ctest exits 0 when it finds no
+      # tests at all, so the check would report a confident green on exactly
+      # the branch with no coverage. Fail loudly instead.
+      #
+      # If you would rather main report green until it carries the suite,
+      # delete `--no-tests=error` from the line below; nothing else depends
+      # on it.
+      - name: Run ctest
+        run: ctest --test-dir emulator/build --no-tests=error --output-on-failure
