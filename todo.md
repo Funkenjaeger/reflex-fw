@@ -203,6 +203,34 @@ motion that the servo did not cause.
 - ~~The same degree of freedom in the unit-test `Lash` fixture~~ — DONE.
   `Rig::nudgeCarriage()` injects carriage motion the servo did not cause,
   independently of the serve-mode command channel.
+
+  **DECIDED 2026-08-13 (Evan): keep `Rig::nudgeCarriage()` and `LathePhysics`
+  separate. Do NOT promote it into the shared model.** This item previously
+  recorded the *fact* of the split with no rationale, which is why it kept
+  reading as unfinished. The rationale:
+
+  `LathePhysics` already has a carriage-displacement input — `z move` / `z jog`
+  via the serve-mode channel, added 2026-08-10 (see the entry below). Crucially
+  `moveCarriageTo`/`jogCarriage` **refuse while the nut is ENGAGED**, and that
+  refusal is deliberately part of the physics model: "only valid with the nut
+  open" is a property of the machine, so it belongs where the machine is
+  modelled.
+
+  `Rig::nudgeCarriage()` is a bare `zBase += zCounts` on the ISR-level `Rig`
+  with no such guard, and that is correct for what it is. An ISR-level harness
+  must be able to inject states the physics model forbids — that is the whole
+  point of testing what firmware does when the world misbehaves.
+
+  So promotion has only two outcomes and both are bad: the promoted function
+  keeps its lack of a guard, and the physics model acquires a hole that lets
+  production paths move the carriage through an engaged nut; or it acquires the
+  guard, and the ISR tests can no longer inject the uncoupled-but-moving case
+  they exist to cover. They are not duplicates — they model different layers,
+  and the missing piece was only ever this paragraph.
+
+  Detail: journal 2026-08-13. **This decision is estate-level, not branch-level
+  — the wiki/journal copy is authoritative; this note is a mirror that only
+  reaches branches as they merge.**
 - ~~Regression case: a withheld take-up must NOT be satisfied by hand motion~~ —
   DONE, and it is what pins motion attribution: `els_takeup_confirm_test.cpp`
   now runs an identical 20-count shove twice inside the same open window, once
