@@ -144,3 +144,18 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_stop_resume_relatch_test m pthread)
 add_test(NAME els_stop_resume_relatch_test COMMAND els_stop_resume_relatch_test)
+
+# ISR-level backlash-CALIBRATION motion attribution (task 6a7c455e). Drives
+# data->elsCal through the real SynchroRefreshTimerIsr(), same stub strategy
+# as els_takeup_confirm_test. REQUIRES the calibration slip-attribution
+# infrastructure (elsCalCtx_t.slip, els_backlash_cal.h's elsSlipConfirmed()
+# call, and this ISR's own calibration attribution-tick block) -- currently
+# only present once the 2026-08-10 staged patch
+# (els-calibration-slip-attribution.patch) is applied on top of this branch.
+add_executable(els_cal_isr_attribution_test
+    ${CMAKE_SOURCE_DIR}/test/els_cal_isr_attribution_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_cal_isr_attribution_test m pthread)
+add_test(NAME els_cal_isr_attribution_test COMMAND els_cal_isr_attribution_test)
