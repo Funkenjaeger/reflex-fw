@@ -237,12 +237,43 @@ motion that the servo did not cause.
   ~50 ticks after the last pulse (confirms — inertia) and once 5000 ticks after
   (refused — a handwheel). Mutation-proven selective: disabling attribution
   reddens the second and leaves the first green.
-- STILL OPEN: **a calibration leg must not be satisfied by hand motion either.**
-  `elsCalUpdate()` still uses the bare `elsZMotionSeen()` endpoint test, so a
-  nudge during a measurement leg is indistinguishable from lash being crossed —
-  the same defect shape, in the code path that produces the numbers the take-up
-  gate is then judged against. `elsSlipTick()` is the primitive it needs; the
-  accumulator is currently only fed while `takeupPending`.
+- ~~Regression case: a calibration leg must not be satisfied by hand motion
+  either~~ — DONE 2026-08-13, `emulator/test/els_cal_nudge_refusal_test.cpp`.
+
+  **This bullet used to say the defect was STILL OPEN, and that was stale.** It
+  described `elsCalUpdate()` as still using the bare `elsZMotionSeen()` endpoint
+  test with the accumulator fed only while `takeupPending`. Commit `84c396b`
+  (2026-08-10) had already landed the fix on this branch: `elsCalTick()` decides
+  on `elsSlipConfirmed(&ctx->slip, ...)`, `elsCalCtx_t` carries its own
+  `elsSlipAccum_t`, and `Ramps.c` ticks it from the same point in the ISR the
+  take-up's accumulator is ticked from. What was actually missing was any test
+  that would notice if that came back out.
+
+  It is now the take-up file's paired-shove convention one layer down: the same
+  20-count shove is delivered to the same armed MEASURE leg of the same coupled
+  rig, once with the servo mid-drive (confirms — indistinguishable from inertial
+  settle, and a healthy slow machine depends on that) and once after the servo
+  has been silent past the settle horizon (refused). Mutation-proven: reverting
+  the `moved` line to `elsZMotionSeen()` makes the refused arm record a bogus
+  2-step "lash" and re-baseline `stepsRef`, and left the verdict of all eight
+  pre-existing targets intact.
+
+  **What still is NOT covered, and cannot be yet:** the `&& data->elsCal.armed`
+  gate on `Ramps.c`'s calibration attribution-tick block. Deleting that clause
+  leaves all nine targets green, because `elsCalTick()` calls `elsSlipReset()`
+  at the instant a leg arms and nothing reads the accumulator before that — the
+  gate is defense in depth, not observable behavior. Writing a test for it needs
+  a consumer of the pre-arm accumulator to exist first.
+- STILL OPEN: **the mid-drive shove remains undecidable, and that is a sensor
+  problem, not a code problem.** A nudge landing inside the settle horizon of a
+  real pulse cannot be told from genuine inertial settle using Z and commanded
+  steps alone (`els_slip.h`, "WHAT THIS DOES NOT DO"), and on a calibration leg
+  the leadscrew is turning for the whole leg, so that is the entire exposure
+  window. `els_cal_isr_attribution_test.cpp` and the KNOWN GAP case in
+  `els_backlash_cal_test.cpp` both assert it is open so it cannot quietly be
+  mistaken for closed. Closing it needs a detector of a different shape (e.g.
+  correlating Z RATE against commanded step rate over a sliding window) — design
+  work, and nothing goes near elspi without sign-off.
 - ~~An external carriage-displacement input to `LathePhysics`~~ — DONE
   2026-08-10. The serve-mode stdin channel (`emulator/src/main.cpp`) gained
   `z move <mm>` / `z jog <-1|0|1>` and `halfnut open` / `halfnut close`.

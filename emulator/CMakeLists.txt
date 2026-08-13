@@ -159,3 +159,20 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_cal_isr_attribution_test m pthread)
 add_test(NAME els_cal_isr_attribution_test COMMAND els_cal_isr_attribution_test)
+
+# ISR-level regression: a calibration leg must NOT be satisfied by carriage
+# motion the servo did not produce. Sibling of els_cal_isr_attribution_test
+# (same stub strategy, same Rig/Lash shape) but pinning the DECIDABLE half:
+# that file drives the shove the settle horizon deliberately cannot see, so it
+# passes with or without the attribution fix; this one drives a shove delivered
+# after the servo has been silent past the horizon, which is the case
+# elsSlipConfirmed() exists to refuse. Mutation-verified 2026-08-13: reverting
+# els_backlash_cal.h's `moved` line to elsZMotionSeen() turns THIS target's
+# VERDICT red, while leaving the verdict of every pre-existing target intact.
+add_executable(els_cal_nudge_refusal_test
+    ${CMAKE_SOURCE_DIR}/test/els_cal_nudge_refusal_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_cal_nudge_refusal_test m pthread)
+add_test(NAME els_cal_nudge_refusal_test COMMAND els_cal_nudge_refusal_test)
