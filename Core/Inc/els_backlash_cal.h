@@ -88,6 +88,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "els_slip.h"
+
 /* Number of measured reversals per calibration run. Three is what makes the
  * consistency check meaningful; the host decides whether the spread is
  * acceptable (policy lives in the UI, measurement lives here). */
@@ -123,11 +125,23 @@ typedef struct {
   uint16_t cycle;                      /* 0..ELS_CAL_CYCLES-1 */
   int32_t  driveSign;                  /* +1/-1 currently commanded direction */
   int32_t  stepsRef;                   /* servo.currentSteps when the leg armed */
-  int32_t  zRef;                       /* Z scale position when the leg armed */
+  int32_t  zRef;                       /* Z scale position when the leg armed -- diagnostic only now; elsSlipConfirmed(&slip, ...) is what actually gates the leg (see moved test below) */
   int32_t  measured[ELS_CAL_CYCLES];   /* lash per reversal, in servo steps */
   int32_t  prevSteps;                  /* servo.currentSteps last tick; used to detect the reversal pulse */
   uint16_t armed;                      /* 1 once the leadscrew is actually moving the commanded way */
   uint16_t result;                     /* ELS_CAL_* */
+  /* Motion attribution for THIS leg -- same primitive the take-up gate uses
+   * (els_slip.h), reused rather than rebuilt (see els_slip.h's own header note
+   * on why it exists as a standalone module). Reset by elsCalTick() itself at
+   * the exact tick the leg arms (the same instant zRef above is baselined), so
+   * residual motion from the deceleration/reversal ramp is excluded exactly as
+   * it always was. TICKED BY THE CALLER (elsCalUpdate() in Ramps.c), from the
+   * SAME point in the ISR the take-up's own elsSlip is ticked from -- after
+   * step-pulse generation, the only point where this tick's dZ and this tick's
+   * dServo are both fresh. Do not tick it from inside elsCalUpdate() before
+   * that point: see the "MOTION ATTRIBUTION" comment in Ramps.c for why that
+   * would stale-pair last tick's Z against this tick's pulse. */
+  elsSlipAccum_t slip;
 } elsCalCtx_t;
 
 /* What the caller should do to the servo this tick. The pure layer decides;
@@ -374,6 +388,12 @@ static inline elsCalAction_t elsCalTick(elsCalCtx_t *ctx,
           ctx->armed    = 1;
           ctx->stepsRef = prevSteps;
           ctx->zRef     = zPos;
+          /* Fresh attribution window for THIS leg, baselined at the exact same
+           * tick as zRef above. Ticking is the caller's job from here on (see
+           * the field comment on elsCalCtx_t.slip); nothing seen before this
+           * reset -- including this tick's own dZ, which predates the leg --
+           * can count as evidence for it. */
+          elsSlipReset(&ctx->slip);
         } else {
           if (stepsRemaining == 0) {
             /* Drove a whole ceiling and the servo never even moved the
@@ -388,7 +408,24 @@ static inline elsCalAction_t elsCalTick(elsCalCtx_t *ctx,
         }
       }
 
-      bool moved = elsZMotionSeen(zPos, ctx->zRef, motionThreshCounts);
+      /* THE FIX (2026-08-10): this used to be the bare endpoint comparison
+       * elsZMotionSeen(zPos, ctx->zRef, motionThreshCounts) -- exactly the
+       * defect the take-up gate had, one layer down. A hand nudge on the
+       * carriage during a measurement leg satisfied it identically to the
+       * lash actually being crossed, and the resulting calMeasured[] value
+       * (a distance with NOTHING to do with the true mechanical lash --
+       * purely an artifact of when the leadscrew happened to have turned to
+       * by the time someone bumped the carriage) feeds directly into
+       * elsTakeupConfirmThreshold(), which is the standard the take-up gate
+       * is judged against on every real cut thereafter. Poisoning this poisons
+       * that. elsSlipConfirmed() is the same primitive the take-up gate uses
+       * (els_slip.h) -- built once there, reused here rather than rebuilt --
+       * so only Z motion attributed to the servo's own pulses can complete a
+       * leg. A nudge landing well outside the settle horizon of any real pulse
+       * (the common case: the servo is turning steadily during a leg, so
+       * "recently pulsed" and "just now" are usually the same thing except
+       * right at a reversal) no longer counts. */
+      bool moved = elsSlipConfirmed(&ctx->slip, motionThreshCounts);
 
       if (moved) {
         if (ctx->phase == ELS_CAL_MEASURE) {

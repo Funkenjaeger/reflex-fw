@@ -929,6 +929,23 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
                 elsSlipSettleTicks(ELS_SLIP_SETTLE_TICKS, (int32_t)servoCycles));
   }
 
+  /* Same motion-attribution primitive, same placement, same reasoning -- for the
+   * backlash calibration legs (elsCalUpdate() above, which runs BEFORE this
+   * point in the ISR and therefore cannot see this tick's own dServo without
+   * the same stale-pairing bug described above). elsCalCtx_t.slip is reset by
+   * elsCalTick() itself at the instant a leg arms; from then until the leg ends
+   * it is ticked from here, exactly like data->elsSlip is for the take-up.
+   * Gated on `armed` (not just phase != IDLE) so the deceleration/reversal ramp
+   * before arming -- deliberately excluded from the measurement -- does not
+   * accumulate into a window that has not started yet. */
+  if (data->elsCal.phase != ELS_CAL_IDLE && data->elsCal.armed) {
+    uint16_t zIdx   = shared->elsStop.scaleIndex;
+    int32_t  dZ     = data->scalesDeltaPos[zIdx].delta * shared->scales[zIdx].scaleDir;
+    int32_t  dServo = (int32_t)(shared->servo.currentSteps - servoStepsBeforePulse);
+    elsSlipTick(&data->elsCal.slip, dZ, dServo,
+                elsSlipSettleTicks(ELS_SLIP_SETTLE_TICKS, (int32_t)servoCycles));
+  }
+
   /* Divide-by-zero guard. The zero window is REACHABLE, not theoretical:
    * servoCycles is 0 from reset (Ramps.c:64) and its only writer is
    * updateSpeedTask (Ramps.c:613), but RampsStart() enables the 100 kHz TIM9
