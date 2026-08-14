@@ -448,6 +448,84 @@ int main() {
         for (int i = 0; i < 5; i++) rig.stepDriven();
         checkEq(rig.data.shared.elsStop.takeupPending, 0,
                 "motion arriving while the window is open CONFIRMS");
+
+        /* This nudge lands ~50 ticks after the last commanded pulse — inside the
+         * settle horizon, so attribution credits it to the servo. That is the
+         * POSITIVE HALF of the pair below: same fixture, same window, same
+         * nudge, and the ONLY difference is how long after the last pulse it
+         * arrived. If a change ever makes both this and the next case agree,
+         * attribution has stopped discriminating and the pair is dead. */
+        check(rig.data.elsSlip.attributedZCounts != 0,
+              "...and it confirmed on ATTRIBUTED motion, not raw endpoint delta");
+    }
+
+    /* The bounded window shrank the 2026-08-08 exposure from "forever" to
+     * ~250 ms. It did not change its SHAPE: any Z motion from any source inside
+     * that window was still accepted as proof the half-nut was engaged. A person
+     * can reach a handwheel well inside 250 ms.
+     *
+     * Attribution is what changes the shape. The nudge below is identical to the
+     * one above and lands in the same open window — it is simply no longer
+     * adjacent to a commanded pulse, so it is not evidence of coupling. */
+    printf("\n-- hand nudge INSIDE the window but long after the last pulse does NOT confirm --\n");
+    {
+        /* MUTATION 1: delete the `ticksSinceLastPulse <= settleTicks` branch in
+         * elsSlipTick() (i.e. attribute every tick's dZ unconditionally) and
+         * THIS case goes red while the inertia case above stays green. That
+         * selectivity is the proof — a mutation that reddens both only shows the
+         * gate stopped confirming at all, which any broken gate achieves.
+         *
+         * MUTATION 2: raise ELS_SLIP_SETTLE_TICKS above the 5000-tick delay
+         * below and this case goes red too, on the same code path. That is not a
+         * defect in the test, it IS the constant's meaning: the horizon is the
+         * exposure, and this test measures it. */
+        Rig rig;
+        rig.init(90, 2, /*coupled*/ false, 60);   /* nut open: no driven motion */
+        rig.armAndTrigger();
+        rig.step(Z_CLEAR);
+        rig.beginLashDriven();
+
+        for (int i = 0; i < 60000
+             && rig.data.shared.elsStop.takeupResult != ELS_TAKEUP_ERR_UNCONFIRMED; i++)
+            rig.stepDriven();
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "withheld first");
+
+        /* Coast far past any plausible mechanical settle, but nowhere near the
+         * 25000-tick window. This is the interval the old code could not judge. */
+        for (int i = 0; i < 5000; i++) rig.stepDriven();
+        checkEq(rig.data.elsStopTakeupLatched, 0,
+                "window is STILL OPEN — the old gate would still be listening");
+
+        rig.nudgeCarriage(20);          /* same shove that confirmed above */
+        for (int i = 0; i < 200; i++) rig.stepDriven();
+
+        /* Assert the motion was SEEN before asserting it was refused. Without
+         * this, a fixture that silently failed to inject the nudge would pass
+         * this test for entirely the wrong reason. */
+        checkEq((int32_t)rig.data.elsSlip.unattributedZCounts, 20,
+                "the carriage DID move 20 counts, and attribution logged it");
+        checkEq((int32_t)rig.data.elsSlip.attributedZCounts, 0,
+                "...but none of it arrived while the servo was driving");
+
+        /* NEGATIVE: this rig's take-up runs the other way, so a +20 count shove
+         * is 20 counts the WRONG way. Both nudge cases in this file are, and the
+         * one above confirms anyway — because the gate is magnitude-only, by
+         * deliberate inheritance from elsZMotionSeen() (els_backlash_cal.h on
+         * why detection is polarity-free). Attribution did not change that and
+         * is not the place to: a signed gate is a separate strictness increase
+         * whose own failure mode is a miscomputed droSign refusing forever.
+         * Pinned here so that decision is made with this in view — flipping the
+         * gate signed turns the inertia case above red until its nudge is
+         * re-aimed, which is a test artifact, not evidence either way. */
+        checkEq(rig.data.shared.elsStop.lastTakeupZDelta, -20,
+                "raw endpoint delta: 20 counts of motion the OLD gate confirmed on");
+        checkEq(rig.data.shared.elsStop.takeupResult, ELS_TAKEUP_ERR_UNCONFIRMED,
+                "STILL REFUSED — a hand-pushed carriage is not evidence of coupling");
+        checkEq(rig.data.shared.elsStop.takeupPending, 1,
+                "still withholding, window still open");
+        check(rig.data.shared.elsStop.lastIdealAdvance == SENTINEL,
+              "applyPhaseCorrection never ran");
     }
 
     printf("\n-- late motion AFTER the window does NOT confirm (the HW defect) --\n");

@@ -148,6 +148,31 @@ instead of leaving bare `TODO:` comments in code.
   and deliberate, but confirm the real magnitude on metal before tuning the
   margin floor down.
 
+### Commission `ELS_SLIP_SETTLE_TICKS` on elspi (UNMEASURED PARAMETER)
+
+Motion attribution (`Core/Inc/els_slip.h`) replaced the 250 ms confirmation
+window as the thing that actually bounds the 2026-08-08 exposure. The number
+that bound is now made of — `ELS_SLIP_SETTLE_TICKS` in `Ramps.c`, currently
+**1000 ticks (~10 ms at the 100 kHz ISR rate)** — has never been measured on the
+machine, and **cannot be measured in the emulator**: its lash model moves the
+carriage instantaneously with the pulse, so it has no settle behaviour at all.
+The value there satisfies the structural constraints (above `ELS_SETTLE_TICKS`,
+above pulse pacing) and nothing more.
+
+To commission it: run a real take-up at the take-up speed actually in use and
+watch how long Z counts keep arriving after the last commanded pulse. Set the
+horizon just above that. Tune it **down** from 1000 against a machine that still
+confirms reliably — never up to make a refusal go away, since the horizon is
+exactly the interval in which a hand nudge is still accepted as evidence.
+
+Two unit traps, both live (full list in `els_slip.h`):
+- **Ticks, not milliseconds.** The emulator's real-time serve loop drives the
+  same ISR ~10x slower than hardware (`emulator/src/main.cpp`), so a horizon
+  chosen by wall-clock there is 10x wrong on the lathe.
+- **200 vs 400 counts/mm.** The horizon itself is a time quantity and so is
+  resolution-independent, but any *counts* threshold eyeballed off emulator
+  output is 2x wrong on elspi.
+
 ---
 
 ## Emulator
@@ -175,13 +200,109 @@ open. No test could express that, because the model has no input for carriage
 motion that the servo did not cause.
 
 **Needed:**
-- An external carriage-displacement input to `LathePhysics` — a nudge/jog the
-  test or dashboard can apply independently of the servo, valid only while the
-  half-nut is open (with it closed the carriage is captive).
-- The same degree of freedom in the unit-test `Lash` fixture, so ISR-level tests
-  can inject motion mid-take-up and mid-calibration.
-- Regression cases: a withheld take-up must NOT be satisfied by hand motion; a
-  calibration leg must not be satisfied by it either.
+- ~~The same degree of freedom in the unit-test `Lash` fixture~~ — DONE.
+  `Rig::nudgeCarriage()` injects carriage motion the servo did not cause,
+  independently of the serve-mode command channel.
+
+  **DECIDED 2026-08-13 (Evan): keep `Rig::nudgeCarriage()` and `LathePhysics`
+  separate. Do NOT promote it into the shared model.** This item previously
+  recorded the *fact* of the split with no rationale, which is why it kept
+  reading as unfinished. The rationale:
+
+  `LathePhysics` already has a carriage-displacement input — `z move` / `z jog`
+  via the serve-mode channel, added 2026-08-10 (see the entry below). Crucially
+  `moveCarriageTo`/`jogCarriage` **refuse while the nut is ENGAGED**, and that
+  refusal is deliberately part of the physics model: "only valid with the nut
+  open" is a property of the machine, so it belongs where the machine is
+  modelled.
+
+  `Rig::nudgeCarriage()` is a bare `zBase += zCounts` on the ISR-level `Rig`
+  with no such guard, and that is correct for what it is. An ISR-level harness
+  must be able to inject states the physics model forbids — that is the whole
+  point of testing what firmware does when the world misbehaves.
+
+  So promotion has only two outcomes and both are bad: the promoted function
+  keeps its lack of a guard, and the physics model acquires a hole that lets
+  production paths move the carriage through an engaged nut; or it acquires the
+  guard, and the ISR tests can no longer inject the uncoupled-but-moving case
+  they exist to cover. They are not duplicates — they model different layers,
+  and the missing piece was only ever this paragraph.
+
+  Detail: journal 2026-08-13. **This decision is estate-level, not branch-level
+  — the wiki/journal copy is authoritative; this note is a mirror that only
+  reaches branches as they merge.**
+- ~~Regression case: a withheld take-up must NOT be satisfied by hand motion~~ —
+  DONE, and it is what pins motion attribution: `els_takeup_confirm_test.cpp`
+  now runs an identical 20-count shove twice inside the same open window, once
+  ~50 ticks after the last pulse (confirms — inertia) and once 5000 ticks after
+  (refused — a handwheel). Mutation-proven selective: disabling attribution
+  reddens the second and leaves the first green.
+- ~~Regression case: a calibration leg must not be satisfied by hand motion
+  either~~ — DONE 2026-08-13, `emulator/test/els_cal_nudge_refusal_test.cpp`.
+
+  **This bullet used to say the defect was STILL OPEN, and that was stale.** It
+  described `elsCalUpdate()` as still using the bare `elsZMotionSeen()` endpoint
+  test with the accumulator fed only while `takeupPending`. Commit `84c396b`
+  (2026-08-10) had already landed the fix on this branch: `elsCalTick()` decides
+  on `elsSlipConfirmed(&ctx->slip, ...)`, `elsCalCtx_t` carries its own
+  `elsSlipAccum_t`, and `Ramps.c` ticks it from the same point in the ISR the
+  take-up's accumulator is ticked from. What was actually missing was any test
+  that would notice if that came back out.
+
+  It is now the take-up file's paired-shove convention one layer down: the same
+  20-count shove is delivered to the same armed MEASURE leg of the same coupled
+  rig, once with the servo mid-drive (confirms — indistinguishable from inertial
+  settle, and a healthy slow machine depends on that) and once after the servo
+  has been silent past the settle horizon (refused). Mutation-proven: reverting
+  the `moved` line to `elsZMotionSeen()` makes the refused arm record a bogus
+  2-step "lash" and re-baseline `stepsRef`, and left the verdict of all eight
+  pre-existing targets intact.
+
+  **What still is NOT covered, and cannot be yet:** the `&& data->elsCal.armed`
+  gate on `Ramps.c`'s calibration attribution-tick block. Deleting that clause
+  leaves all nine targets green, because `elsCalTick()` calls `elsSlipReset()`
+  at the instant a leg arms and nothing reads the accumulator before that — the
+  gate is defense in depth, not observable behavior. Writing a test for it needs
+  a consumer of the pre-arm accumulator to exist first.
+- STILL OPEN: **the mid-drive shove remains undecidable, and that is a sensor
+  problem, not a code problem.** A nudge landing inside the settle horizon of a
+  real pulse cannot be told from genuine inertial settle using Z and commanded
+  steps alone (`els_slip.h`, "WHAT THIS DOES NOT DO"), and on a calibration leg
+  the leadscrew is turning for the whole leg, so that is the entire exposure
+  window. `els_cal_isr_attribution_test.cpp` and the KNOWN GAP case in
+  `els_backlash_cal_test.cpp` both assert it is open so it cannot quietly be
+  mistaken for closed. Closing it needs a detector of a different shape (e.g.
+  correlating Z RATE against commanded step rate over a sliding window) — design
+  work, and nothing goes near elspi without sign-off.
+- ~~An external carriage-displacement input to `LathePhysics`~~ — DONE
+  2026-08-10. The serve-mode stdin channel (`emulator/src/main.cpp`) gained
+  `z move <mm>` / `z jog <-1|0|1>` and `halfnut open` / `halfnut close`.
+  Together they express the third state: **uncoupled but moving anyway**.
+  `moveCarriageTo`/`jogCarriage` already refuse while the nut is ENGAGED, so
+  the "only valid with the nut open" rule stays inside the physics model.
+
+  `halfnut` takes an explicit STATE, not a toggle, and the distinction is
+  load-bearing: a toggle issued while an engage is waiting for phase alignment
+  CANCELS it, so a toggle-shaped command means different things depending on
+  state a test cannot see. `LathePhysics::setHalfNutEngaged()` is idempotent;
+  `els_halfnut_test` T8 pins all four transitions, and the naive
+  "toggle if it disagrees" implementation reddens 6 of its assertions.
+
+  Serve mode still force-engages the nut at boot for **any** `EMU_SCENARIO`
+  value — deliberately left alone. A test that wants the nut open now says so,
+  which keeps every existing scenario working unchanged.
+
+- ~~SYSTEM-level regression~~ — DONE 2026-08-10, and it lives in the OTHER
+  repo: `reflex-ui/tests/system/test_els_takeup_attribution.py`. Runs the real
+  operator cycle (cut a pass → stop → retract → open the nut → press Cut) and
+  shoves the carriage mid-window. Mutation-proven: reverting the firmware gate
+  to the endpoint comparison reddens the refusal case while the coupled
+  positive control stays green.
+
+  Note for whoever moves this next: the take-up does NOT run on the first cut.
+  The resume path needs `referenceLatched`, which the FIRMWARE sets at a real
+  stop trigger — so a take-up always has a completed pass in front of it. That
+  is also precisely the situation the 2026-08-08 defect occurred in.
 
 **Design note for whoever does this:** a fixture that cannot express a failure
 makes tests that agree with the code and are wrong together. The take-up gate

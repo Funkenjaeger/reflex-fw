@@ -86,6 +86,16 @@ target_include_directories(els_backlash_cal_test PRIVATE ${CMAKE_SOURCE_DIR}/../
 target_link_libraries(els_backlash_cal_test m)
 add_test(NAME els_backlash_cal_test COMMAND els_backlash_cal_test)
 
+# Motion attribution (Core/Inc/els_slip.h): which Z counts arrived while the
+# servo was actually driving. Header-only, same shape as the cal test. Drives
+# the accumulator tick by tick, which is the ONLY place the settle horizon's
+# timing properties are reachable — the ISR fixture's lash model responds to a
+# pulse instantly, so every horizon behaves identically there.
+add_executable(els_slip_test ${CMAKE_SOURCE_DIR}/test/els_slip_test.cpp)
+target_include_directories(els_slip_test PRIVATE ${CMAKE_SOURCE_DIR}/../Core/Inc)
+target_link_libraries(els_slip_test m)
+add_test(NAME els_slip_test COMMAND els_slip_test)
+
 # Half-nut engagement physics tests: exercise LathePhysics directly. Links
 # physics.cpp + config.cpp (EmuConfig ctor); the test file stubs the shim
 # externals (emu_hw, emu_log_event, emu_update_timer_counters), so hal_shim.c
@@ -134,3 +144,35 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_stop_resume_relatch_test m pthread)
 add_test(NAME els_stop_resume_relatch_test COMMAND els_stop_resume_relatch_test)
+
+# ISR-level backlash-CALIBRATION motion attribution (task 6a7c455e). Drives
+# data->elsCal through the real SynchroRefreshTimerIsr(), same stub strategy
+# as els_takeup_confirm_test. REQUIRES the calibration slip-attribution
+# infrastructure (elsCalCtx_t.slip, els_backlash_cal.h's elsSlipConfirmed()
+# call, and this ISR's own calibration attribution-tick block) -- currently
+# only present once the 2026-08-10 staged patch
+# (els-calibration-slip-attribution.patch) is applied on top of this branch.
+add_executable(els_cal_isr_attribution_test
+    ${CMAKE_SOURCE_DIR}/test/els_cal_isr_attribution_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_cal_isr_attribution_test m pthread)
+add_test(NAME els_cal_isr_attribution_test COMMAND els_cal_isr_attribution_test)
+
+# ISR-level regression: a calibration leg must NOT be satisfied by carriage
+# motion the servo did not produce. Sibling of els_cal_isr_attribution_test
+# (same stub strategy, same Rig/Lash shape) but pinning the DECIDABLE half:
+# that file drives the shove the settle horizon deliberately cannot see, so it
+# passes with or without the attribution fix; this one drives a shove delivered
+# after the servo has been silent past the horizon, which is the case
+# elsSlipConfirmed() exists to refuse. Mutation-verified 2026-08-13: reverting
+# els_backlash_cal.h's `moved` line to elsZMotionSeen() turns THIS target's
+# VERDICT red, while leaving the verdict of every pre-existing target intact.
+add_executable(els_cal_nudge_refusal_test
+    ${CMAKE_SOURCE_DIR}/test/els_cal_nudge_refusal_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_cal_nudge_refusal_test m pthread)
+add_test(NAME els_cal_nudge_refusal_test COMMAND els_cal_nudge_refusal_test)
