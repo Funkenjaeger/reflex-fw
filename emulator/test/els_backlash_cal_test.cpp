@@ -73,13 +73,27 @@ struct Drivetrain {
     }
 };
 
-/* Drive a full calibration run against the model. Returns ticks consumed. */
+/* Drive a full calibration run against the model. Returns ticks consumed.
+ *
+ * ATTRIBUTION TICKING: this fixture has no ISR, so it has to play the same
+ * role Ramps.c does for the real machine -- tick ctx.slip itself, AFTER each
+ * commanded step, once that step's dZ and dServo are both fresh (the same
+ * placement discipline Ramps.c's "MOTION ATTRIBUTION" comment requires; see
+ * also els_slip.h). elsCalTick() only RESETS ctx.slip (at the instant a leg
+ * arms) and READS it (elsSlipConfirmed) -- it does not tick it, so a caller
+ * that never ticks is a caller that never confirms anything, on purpose: an
+ * accumulator that silently drifts stale by itself would fail open, not
+ * closed, and this primitive is built the other way round. settleTicks uses
+ * elsSlipSettleTicks() rather than a bare constant for the same reason the ISR
+ * does -- this model issues a step nearly every tick while driving (no pulse
+ * pacing gaps), so any positive floor discriminates correctly here. */
 static int32_t runCal(elsCalCtx_t &ctx, Drivetrain &dt,
                       int32_t ceiling, int32_t threshCounts,
                       int32_t cuttingDir, int32_t maxTicks = 2000000)
 {
     elsCalStart(&ctx, cuttingDir, dt.currentSteps, dt.z);
     int32_t stepsToGo = ctx.driveSign * ceiling;
+    const int32_t settleTicks = elsSlipSettleTicks(5, 1);
 
     for (int32_t t = 0; t < maxTicks; t++) {
         elsCalAction_t act = elsCalTick(&ctx, dt.currentSteps, dt.z,
@@ -89,8 +103,11 @@ static int32_t runCal(elsCalCtx_t &ctx, Drivetrain &dt,
 
         if (stepsToGo != 0) {                  /* the indexing ramp, simplified */
             int32_t dir = (stepsToGo > 0) ? 1 : -1;
+            int32_t stepsBefore = dt.currentSteps, zBefore = dt.z;
             dt.advance(dir);
             stepsToGo -= dir;
+            elsSlipTick(&ctx.slip, dt.z - zBefore, dt.currentSteps - stepsBefore,
+                        settleTicks);
         }
     }
     return -1;   /* did not terminate */
@@ -223,6 +240,96 @@ int main() {
         checkEq(ctx.cycle, 0, "no measurement was recorded");
     }
 
+    /* ---------------- Hand nudge during an OPEN-HALF-NUT leg -------------- *
+     * 2026-08-10: elsCalUpdate() used to test the bare cumulative endpoint
+     * (elsZMotionSeen), so ANY Z drift since arming -- regardless of source --
+     * satisfied a leg. It now tests elsSlipConfirmed(&ctx->slip, ...), the same
+     * attribution primitive that closed the analogous take-up hole (see
+     * els_slip.h), reused rather than rebuilt per this task's own standing
+     * instruction.
+     *
+     * WHAT THIS DOES AND DOES NOT PROVE -- read before trusting the green below
+     * ------------------------------------------------------------------------
+     * The take-up gate's exploit (2026-08-08) lands in the POST-drive dwell:
+     * the servo has REACHED ITS TARGET and stopped pulsing, the gate is still
+     * open re-evaluating for ~250 ms, and a nudge arriving late in that window
+     * is genuinely distinguishable from a pulse-adjacent settle because
+     * ticksSinceLastPulse has had time to grow past the settle horizon.
+     *
+     * The calibration leg has NO analogous post-drive window. elsCalTick()
+     * checks for motion on EVERY tick WHILE THE LEADSCREW IS STILL ACTIVELY
+     * TURNING (that is the whole leg, start to finish -- see the FSM above:
+     * there is no dwell state between "still driving" and "leg over"). On an
+     * open half-nut the leadscrew keeps issuing step pulses the entire time
+     * the leg runs (that is the Drivetrain model's own stated semantics:
+     * "the leadscrew turns forever and Z never moves"). elsSlipSettleTicks()'s
+     * floor is DELIBERATELY sized to cover the largest gap reachable between
+     * consecutive pulses in a live burst (servoCyclePeriod - 1), specifically
+     * so a healthy slow machine is never falsely rejected mid-drive. That same
+     * floor makes it STRUCTURALLY IMPOSSIBLE for attribution to tell a hand
+     * nudge from genuine coupling while the leadscrew keeps turning -- every
+     * tick during an active leg has ticksSinceLastPulse <= settleTicks BY
+     * CONSTRUCTION, so every Z count that arrives during that time is credited
+     * as attributed, whoever actually produced it.
+     *
+     * Net effect, VERIFIED empirically here: for the realistic exposure (an
+     * operator nudging the carriage AT ANY POINT while a leg is actively
+     * driving, which is the entire duration of an open-half-nut leg), this
+     * patch changes NOTHING. The case below is IDENTICAL, with and without the
+     * fix, to the standalone repro at build-manual/repro_cal_defect3.cpp run
+     * against the pre-patch code. This is not a corner case being conceded --
+     * it IS the exploit the task asked this fix to close, and it is still
+     * open. Closing it needs a detector of a different SHAPE (e.g. correlating
+     * the RATE of Z motion against the commanded step rate over a sliding
+     * window, rather than "was there a pulse recently"), which is design work,
+     * not reuse, and needs sign-off before it goes anywhere near elspi. */
+    printf("\n-- KNOWN GAP: hand nudge WHILE the leadscrew is still actively turning --\n");
+    {
+        elsCalCtx_t ctx{};
+        ctx.phase     = ELS_CAL_MEASURE;
+        ctx.driveSign = 1;
+        ctx.armed     = 1;
+        elsSlipReset(&ctx.slip);
+        Drivetrain dt{100, 3, false};   /* open half-nut: leadscrew turns, Z never follows it */
+        int32_t ceiling = 400;
+        int32_t stepsToGo = ctx.driveSign * ceiling;
+        const int32_t settleTicks = elsSlipSettleTicks(5, 1);
+        bool nudged = false;
+
+        for (int32_t t = 0; t < ceiling + 5; t++) {
+            elsCalAction_t act = elsCalTick(&ctx, dt.currentSteps, dt.z, stepsToGo, 2);
+            if (act.finished || act.startPhase) break;   /* leg decided -- stop here */
+
+            int32_t stepsBefore = dt.currentSteps;
+            if (stepsToGo != 0) {
+                int32_t dir = (stepsToGo > 0) ? 1 : -1;
+                dt.advance(dir);           /* uncoupled: currentSteps moves, dt.z does not */
+                stepsToGo -= dir;
+            }
+            int32_t dZ = 0;
+            if (t == 30 && !nudged) {
+                dt.z += 5;                 /* hand nudge -- NOT caused by the servo */
+                dZ = 5;
+                nudged = true;
+            }
+            elsSlipTick(&ctx.slip, dZ, dt.currentSteps - stepsBefore, settleTicks);
+        }
+
+        check(nudged, "the nudge actually landed before the leg decided (fixture sanity)");
+        /* This is the KNOWN GAP, asserted so it cannot silently regress into a
+         * false sense of safety: attribution credited the nudge (the leadscrew
+         * was mid-burst when it arrived), so the leg still completes on it.
+         * MUTATION: this assertion's own failure IS the interesting mutation --
+         * if a future change to elsSlipSettleTicks() or the ISR wiring ever
+         * makes this case correctly refuse (result == ELS_CAL_ERR_NO_MOTION),
+         * that is GOOD NEWS and this comment block (and the task text) need
+         * updating, not the assertion silently deleted. */
+        checkEq(ctx.result, ELS_CAL_OK,
+                "GAP CONFIRMED: still completes on a nudge that arrived mid-drive");
+        check(ctx.cycle >= 1,
+                "...and it recorded a bogus measured[] value from it (not the true lash)");
+    }
+
     /* ---------------- Ordering: motion on the final commanded step ------- */
     printf("\n-- motion detected on the LAST commanded step --\n");
     {
@@ -239,14 +346,18 @@ int main() {
         int32_t stepsToGo = ctx.driveSign * ceiling;
         int32_t guard = 0;
         bool sawFailure = false;
+        const int32_t settleTicks = elsSlipSettleTicks(5, 1);
         while (guard++ < 100000) {
             elsCalAction_t act = elsCalTick(&ctx, dt.currentSteps, dt.z, stepsToGo, 2);
             if (act.finished) { sawFailure = (ctx.result != ELS_CAL_OK); break; }
             if (act.startPhase) stepsToGo = act.driveSign * ceiling;
             if (stepsToGo != 0) {
                 int32_t dir = (stepsToGo > 0) ? 1 : -1;
+                int32_t stepsBefore = dt.currentSteps, zBefore = dt.z;
                 dt.advance(dir);
                 stepsToGo -= dir;
+                elsSlipTick(&ctx.slip, dt.z - zBefore, dt.currentSteps - stepsBefore,
+                            settleTicks);
             }
         }
         check(!sawFailure, "a machine that responds on the last step is NOT condemned");

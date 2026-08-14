@@ -24,6 +24,7 @@
 #include "Modbus.h"
 #include "Scales.h"
 #include "els_backlash_cal.h"
+#include "els_slip.h"
 
 #define MODBUS_ADDRESS 17
 
@@ -176,6 +177,16 @@ typedef struct {
   int32_t  elsStopTakeupTicks;        // ISR ticks since takeup initiation; backstop against a takeup that never reaches target (see ELS_TAKEUP_TIMEOUT_TICKS)
   uint16_t elsStopTakeupLatched;      // 1 once the Z confirmation window has closed on an unconfirmed takeup; further Z motion can no longer release the gate (see ELS_TAKEUP_CONFIRM_WINDOW_TICKS)
   elsCalCtx_t elsCal;                 // backlash calibration run state; non-Modbus, the ISR owns it entirely (els_backlash_cal.h)
+  /* Motion attribution for the Z confirmation gate: which of the Z counts seen
+   * during a take-up arrived while the servo was actually driving. Non-Modbus,
+   * ISR-owned, reset at take-up initiation (els_slip.h).
+   *
+   * Deliberately NOT published over Modbus yet. elsStop_t's tail has a reserved
+   * append order (re-sync, then auto-start) and the attributed/unattributed
+   * split is only worth a protocolVersion bump once reflex-ui has something to
+   * say with it — "moved 20 counts, none of them ours" is a much better refusal
+   * message than the current one, and that is a UI change, not a firmware one. */
+  elsSlipAccum_t elsSlip;
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;

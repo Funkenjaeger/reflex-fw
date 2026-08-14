@@ -368,6 +368,31 @@ void LathePhysics::requestHalfNutToggle() {
     half_nut_request_pending = true;
 }
 
+void LathePhysics::setHalfNutEngaged(bool engaged) {
+    /* Same benign-race pattern as requestHalfNutToggle: written from the
+     * dashboard/serve/stdin thread while the ISR thread may be transitioning
+     * ENGAGING->ENGAGED. Reaching the requested state one tick later is the
+     * only consequence. */
+    if (engaged) {
+        /* ENGAGING is already on its way to ENGAGED, waiting on phase
+         * alignment. Toggling here would cancel it, which is the opposite of
+         * what was asked -- so the in-flight case is deliberately a no-op, not
+         * a re-request. */
+        if (half_nut_state == ENGAGED || half_nut_state == ENGAGING) return;
+        half_nut_request_pending = true;
+        return;
+    }
+
+    if (half_nut_state == DISENGAGED) {
+        /* Already open. Clear any engage request that has not been serviced
+         * yet, or the next tick would close it right back -- "open it" must
+         * mean open, not open-then-reconsider. */
+        half_nut_request_pending = false;
+        return;
+    }
+    requestHalfNutToggle();   /* ENGAGED -> disengage; ENGAGING -> cancel */
+}
+
 void LathePhysics::jogCarriage(int direction) {
     if (half_nut_state == ENGAGED) return;
     z_move_active = false;  /* arrow key jog cancels move-to-position */
