@@ -50,6 +50,12 @@
 #define SPARE_3_PIN GPIO_PIN_4
 #define SPARE_3_GPIO_PORT GPIOA
 
+/* Diagnostic scratchpad geometry. These fix the SIZE of the reserved block in
+ * elsStop_t and must NEVER change: the block's entire purpose is that its
+ * offset is stable, so adding or retiring a probe never moves a register.
+ * Change what goes IN the block (and diagSchema with it), never its size. */
+#define ELS_DIAG_TRACE_BUCKETS 50
+
 
 typedef struct {
   int32_t delta;
@@ -131,6 +137,42 @@ typedef struct {
   int32_t  calMotionThreshCounts; // SW write: Z scale counts that count as real motion. MACHINE-SPECIFIC — ~2 counts on elspi (200 counts/mm, so 1 count ≈ 2.5 servo steps); emulator is 400 counts/mm. 0 disables detection and FAILS CLOSED (never confirms) — deliberate: an unconfigured threshold must refuse, not wave everything through
   int32_t  lastTakeupZDelta;      // READ-ONLY (firmware-owned): signed Z counts moved across the last take-up, projected onto the take-up direction. NEGATIVE means the carriage moved the WRONG way — a distinct fault signature from "didn't move"
   int32_t  takeupThreshCounts;    // READ-ONLY (firmware-DERIVED, not operator-set): Z counts the last take-up had to move to be confirmed. Derived from (backlashSteps - mean(calMeasured)) via elsTakeupConfirmThreshold(); falls back to calMotionThreshCounts with no calibration on file or in turning mode. Published so the UI can say "moved 3, needed 4" instead of just refusing
+  /* --- DIAGNOSTIC SCRATCHPAD — RESERVED, AND NEVER MEANINGFUL IN A BASELINE ---
+   * A fixed 64-register (128-byte) block for temporary firmware-side
+   * instrumentation, so a throwaway probe never has to change the register
+   * LAYOUT and never has to bump protocolVersion again.
+   *
+   * The block is reserved UNCONDITIONALLY — it is part of the map in every
+   * build, which is what makes its offset stable — but every WRITE to it is
+   * compiled out unless ELS_DIAG_SCRATCH is defined. In a release build the
+   * whole block reads zero. That makes "no probe in a real baseline" a property
+   * of the binary rather than a promise in a document: release builds omit the
+   * flag, so the writes do not exist.
+   *
+   * WHY protocolVersion CANNOT GUARD THIS, AND WHAT DOES. The point of
+   * reserving the block is that adding a probe does NOT change the layout — so
+   * the version deliberately does not bump, and nothing would otherwise tell a
+   * reader that diagTrace[] meant one thing last build and something else this
+   * build. That is a channel which hands back a plausible number with the wrong
+   * meaning, which is worse than no channel. diagSchema closes it: it names the
+   * probe currently compiled in, 0 means "nothing here", and ANY reader MUST
+   * check it and refuse to interpret a value it does not recognise. Same
+   * "names itself instead of surfacing as garbled reads" property that
+   * protocolVersion gives the map as a whole.
+   *
+   * READ IT ON DEMAND, NEVER IN THE POLL LOOP. 64 registers is ~12 ms of extra
+   * serial time per read at 115200 baud, against ~29 ms for the entire map —
+   * a permanent 40% tax on every poll cycle, for a block that is empty in every
+   * production build. reflex-ui reads this only when a diagnostic view is open.
+   */
+  uint16_t diagSchema;         // READ-ONLY (firmware-owned): identifies the probe compiled into the block. 0 = none; do NOT interpret anything below it. Never assume a schema you did not read
+  uint16_t diagSeq;            // READ-ONLY (firmware-owned): increments once per COMPLETED capture. Edge-detect this; there is deliberately no "capture in progress" register to poll
+  uint16_t diagBucketTicks;    // READ-ONLY (firmware-owned): ISR ticks summed into each diagTrace bucket. PUBLISHED so the host never has to assume the ISR rate — the repo has disagreed with itself about that rate by 10x
+  uint16_t diagBucketCount;    // READ-ONLY (firmware-owned): populated diagTrace entries, for the same reason
+  int32_t  diagSettleTicks;    // READ-ONLY (firmware-owned): ticks from capture start to the LAST tick that saw nonzero dZ. This is the measurement ELS_SLIP_SETTLE_TICKS is currently a guess at
+  int32_t  diagNetCounts;      // READ-ONLY (firmware-owned): signed Z counts summed across the whole capture
+  int16_t  diagTrace[ELS_DIAG_TRACE_BUCKETS];  // READ-ONLY (firmware-owned): per-bucket SIGNED sum of dZ. Signed rather than magnitude on purpose — encoder dither cancels, real motion does not, which is exactly the distinction a quiescence test needs and the reason to prefer net displacement over summed |dZ|
+  uint16_t diagReserved[6];    // pads the block to a fixed 128 bytes so its size never depends on which probe is in it
 } elsStop_t;
 
 typedef struct {
@@ -179,6 +221,13 @@ typedef struct {
    * say with it — "moved 20 counts, none of them ours" is a much better refusal
    * message than the current one, and that is a UI change, not a firmware one. */
   elsSlipAccum_t elsSlip;
+#ifdef ELS_DIAG_SCRATCH
+  /* Take-up settle-trace capture state. Non-Modbus, ISR-owned, and compiled out
+   * entirely in a release build along with every write to the scratchpad.
+   * 0 = idle, 1 = armed at take-up initiation, 2 = capturing. */
+  uint16_t diagState;
+  uint32_t diagCaptureTick;   // ISR ticks since capture start
+#endif
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;
