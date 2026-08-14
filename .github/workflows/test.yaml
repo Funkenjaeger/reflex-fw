@@ -1,0 +1,117 @@
+name: Test
+
+# No branch filter, deliberately.
+#
+# reflex-fw's only other workflow, release.yaml, triggers on main + dev -- the
+# two branches that cut releases. Those are exactly the two branches that have
+# never run a test. Filtering this workflow to the "development" branches would
+# reproduce that gap in a new file, so it runs everywhere: main, dev,
+# dev-staging, integration and every feature branch.
+#
+# Note this means a PR from a branch in this repo produces two runs (one for
+# the push event, one for the pull_request event). That is accepted: branch
+# protection keys off the pull_request run, and the two jobs are cheap and run
+# in parallel.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref; the newest head always runs to
+# completion, so a required check is never left resolved by a stale run.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Builds emulator/ and runs its ctest suite.
+  #
+  # This job is intended to be a REQUIRED check, so it deliberately has NO
+  # escape hatch: no continue-on-error, no `|| true`, no soft-failing step,
+  # and no cross-repo checkout that could fail for reasons unrelated to this
+  # repo's source. If it is green, the emulator suite genuinely passed.
+  ctest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+        # ubuntu-latest ships both already; installed explicitly as insurance
+        # against runner-image drift. emulator/CMakeLists.txt links only
+        # pthread and m, both part of the standard toolchain, so nothing else
+        # is required.
+
+      - name: Configure
+        run: cmake -S emulator -B emulator/build
+
+      - name: Build
+        run: cmake --build emulator/build
+
+      # --no-tests=error matters: the number of ctest targets differs sharply
+      # by branch (main defines ZERO, dev defines one, dev-staging four,
+      # integration six). Without this flag ctest exits 0 when it finds no
+      # tests at all, so the check would report a confident green on exactly
+      # the branch with no coverage. Fail loudly instead.
+      #
+      # If you would rather main report green until it carries the suite,
+      # delete `--no-tests=error` from the line below; nothing else depends
+      # on it.
+      - name: Run ctest
+        run: ctest --test-dir emulator/build --no-tests=error --output-on-failure
+
+  # Cross-compiles the real firmware (root CMakeLists.txt, arm-none-eabi,
+  # STM32F411) on every branch.
+  #
+  # WHY THIS EXISTS: release.yaml is the only other place this target is built,
+  # and it triggers on main + dev only. A feature branch could therefore break
+  # the firmware build outright and nobody would find out until it was merged
+  # into a release branch -- the point at which it is most expensive. The ctest
+  # job above does not cover this: it builds emulator/, which is host-native
+  # x86 and does not compile Core/ against the ARM toolchain at all.
+  #
+  # THIS IS A BUILD ONLY, AND MUST STAY ONE. No semantic-version step, no tag,
+  # no push, no GitHub release, no artifact upload. release.yaml remains the
+  # sole publisher. Note that this workflow has no branch filter, so anything
+  # added here that writes would write from every branch, including feature
+  # branches.
+  #
+  # Like the ctest job, deliberately NO escape hatch: no continue-on-error, no
+  # `|| true`, no soft-failing step. Green means arm-none-eabi genuinely built
+  # the firmware.
+  arm-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Same package list as release.yaml's "Install packages" step. These two
+      # lists have to stay in step: if this one drifts, the job stops
+      # reproducing the build it is supposed to be guarding, and can pass while
+      # the release build fails.
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -yy \
+          coreutils procps make cmake \
+          build-essential gcc-arm-none-eabi \
+          libstdc++-arm-none-eabi-dev libstdc++-arm-none-eabi-newlib \
+          libnewlib-arm-none-eabi
+
+      # Same invocation as release.yaml, -DCMAKE_BUILD_TYPE=Release included
+      # deliberately. The root CMakeLists.txt only applies -Ofast under that
+      # build type and falls back to -Og otherwise, so a default-type build
+      # would compile at a different optimization level than the one that
+      # ships -- and would not catch a break that only appears at -Ofast.
+      #
+      # The link step runs -Wl,--print-memory-usage, so the log carries the
+      # flash/RAM figures for the firmware that was just built.
+      - name: Build firmware
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+          cmake --build build
