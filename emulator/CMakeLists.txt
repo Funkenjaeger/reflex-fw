@@ -176,3 +176,16 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_cal_nudge_refusal_test m pthread)
 add_test(NAME els_cal_nudge_refusal_test COMMAND els_cal_nudge_refusal_test)
+
+# Diagnostic scratchpad leak guard. Compiles into EITHER configuration and
+# asserts the opposite thing in each: a release build must advertise no probe
+# (diagSchema == 0), a -DELS_DIAG_SCRATCH build must advertise one and publish
+# its trace geometry. A one-sided test here would pass just as happily against a
+# flag that does nothing, so both halves exist on purpose.
+add_executable(els_diag_scratch_test
+    ${CMAKE_SOURCE_DIR}/test/els_diag_scratch_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
+    PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
+target_link_libraries(els_diag_scratch_test m pthread)
+add_test(NAME els_diag_scratch_test COMMAND els_diag_scratch_test)

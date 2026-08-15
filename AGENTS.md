@@ -93,7 +93,7 @@ After any changes to `Core/Src/Ramps.c`, `Core/Inc/Ramps.h`, or other firmware s
 - `Core/Src/Scales.c` — encoder timer init
 
 ### Concurrency
-- TIM9 ISR (`SynchroRefreshTimerIsr`) handles all motion control at ~100 µs ticks
+- TIM9 ISR (`SynchroRefreshTimerIsr`) handles all motion control at ~10 µs ticks (100 kHz)
 - FreeRTOS tasks handle Modbus, speed updates, motor enable
 - `rampsSharedData_t` is the shared state, memory-mapped to Modbus registers
 

@@ -56,6 +56,14 @@
  * Change what goes IN the block (and diagSchema with it), never its size. */
 #define ELS_DIAG_TRACE_BUCKETS 50
 
+/* Diagnostic scratchpad schema ids -- which probe is compiled into the block.
+ * Part of the register CONTRACT, not an implementation detail: reflex-ui
+ * mirrors these and refuses any id it does not recognise, so append only and
+ * never renumber. A stale reader that recognises an old id must not silently
+ * accept a new probe's data under it. 0 means no probe. */
+#define ELS_DIAG_SCHEMA_NONE 0
+#define ELS_DIAG_SCHEMA_TAKEUP_SETTLE 1
+
 
 typedef struct {
   int32_t delta;

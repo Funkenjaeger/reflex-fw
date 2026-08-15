@@ -28,7 +28,7 @@ STM32F411 hardware
 
 The heart of the firmware.
 
-- **`SynchroRefreshTimerIsr()`** — high-priority TIM9 ISR running every ~100 µs. Reads all 4 encoder counters, computes deltas with fractional error tracking, applies sync ratios, and generates step/direction pulses on PA0/PB14. Uses the Cortex-M4 DWT cycle counter to measure its own execution time.
+- **`SynchroRefreshTimerIsr()`** — high-priority TIM9 ISR running every ~10 µs (100 kHz). Reads all 4 encoder counters, computes deltas with fractional error tracking, applies sync ratios, and generates step/direction pulses on PA0/PB14. Uses the Cortex-M4 DWT cycle counter to measure its own execution time.
 - **`updateIndexingPosition()`** — trapezoidal ramp (accel/cruise/decel) for indexed moves.
 - **`updateJogPosition()`** — continuous speed control for jogging.
 - Three FreeRTOS tasks: `userLedTask`, `updateSpeedTask`, `servoEnableTask`.

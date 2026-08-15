@@ -128,7 +128,8 @@
  * Capture starts when the commanded take-up motion completes (the last pulse)
  * and runs for the full window regardless of what the gate decides, so the
  * trace covers the confirm decision rather than stopping at it. */
-#define ELS_DIAG_SCHEMA_TAKEUP_SETTLE 1
+/* Schema ids live in Ramps.h -- they are part of the register contract that
+ * reflex-ui mirrors, not a detail of this file. */
 #define ELS_DIAG_BUCKET_TICKS 100   /* 1 ms at the 100 kHz ISR rate */
 
 #ifdef EMULATOR_BUILD
