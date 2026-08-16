@@ -26,33 +26,61 @@ This project (along with the corresponding UI SW project) was hard forked from t
 
 ## 🛠️ Build & Flash
 
+The ARM toolchain and the ST-Link usually live on **different machines** — the
+Pi that runs the UI has the debug probe hanging off it, and the cross-compiler is
+wherever you write code. `scripts/flash.sh` spans that gap so you do not have to
+think about it.
+
 ### Requirements
 
-* CMake & C/C++ toolchain (e.g. `arm-none-eabi-gcc`, `make`)
-* ST-Link v2
+**Build host:** CMake and an ARM toolchain (`arm-none-eabi-gcc`, `make`).
+**Probe host:** an ST-Link v2 on USB and `openocd` (`sudo apt install openocd`);
+passwordless SSH to it from the build host. The two may be the same machine.
 
-### Build
-
-```bash
-git clone https://github.com/Funkenjaeger/reflex-fw.git
-cd reflex-fw
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-```
-
-### Clean
+### Build and flash
 
 ```bash
-rm -rf build
+./scripts/flash.sh
 ```
 
-### Flash
-
-**ST‑Link V2**, over SWD:
+That builds, copies, verifies the transfer, flashes over SWD, and records what it
+did. Add `--diag` for the diagnostic variant, `--host NAME` to target something
+other than `elspi`, `--dry-run` to do everything except the write.
 
 ```bash
-st-flash --format ihex write build/reflex-fw.hex
+./scripts/flash.sh --diag        # with the ELS settle-trace probe
+./scripts/build.sh               # build only, no flashing
+./scripts/build.sh --diag --clean
 ```
+
+**It rebuilds every time by default.** That is deliberate: with the build on one
+machine and the flash on another, a copy that is quietly one revision behind is
+the easiest mistake to make and the hardest to notice. `--no-build` opts out.
+
+**Two variants, two build directories.** `build/` is the release firmware.
+`build-diag/` adds `-DELS_DIAG_SCRATCH`, compiling in the ELS settle-trace probe
+— **never** put that on `dev-staging`, `dev` or `main`. They are separate
+directories so the flag can never depend on what the last `cmake` invocation
+happened to say. At runtime the `elsStop.diagSchema` register tells you which one
+is running, and the UI logs it at connect.
+
+**Every flash is recorded** in `~/firmware/flashed.json` on the probe host: UTC
+timestamp, variant, git revision, whether the tree was dirty, and the ELF's MD5.
+Working out what firmware was on this lathe once took an afternoon of forensics
+across build-artifact timestamps; this makes it a lookup.
+
+### Underneath
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
+        -c 'transport select swd' -c 'program build/reflex-fw.elf verify reset exit'
+```
+
+OpenOCD rather than `st-flash`: it takes the ELF directly (load addresses come
+from the headers, so there is no `--format`/base-address to get wrong), it is
+markedly more tolerant of ST-Link **clones**, and it is the same tool that would
+drive a GPIO-bitbanged probe if the boards are ever respun without a dongle.
 
 > Bitbanging SWD from a Raspberry Pi's GPIO used to be documented here via
 > `raspberry.cfg`. It has been removed: that config uses OpenOCD's

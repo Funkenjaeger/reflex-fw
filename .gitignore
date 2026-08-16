@@ -118,3 +118,5 @@ emulator.log
 
 # AI
 .claude/
+# Firmware build variants (build/ is listed above; --diag uses build-diag/)
+/build-*/
