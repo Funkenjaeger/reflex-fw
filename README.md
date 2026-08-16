@@ -18,7 +18,7 @@ This project (along with the corresponding UI SW project) was hard forked from t
 
 * Utilizes **STM32CubeMX** for hardware configuration (.ioc file included)
 * Modular firmware structure with FreeRTOS support
-* Supports ST‑Link V2 and Raspberry Pi + OpenOCD programming
+* Programmed over SWD with an ST‑Link V2
 * Optimized for high-speed encoder + stepper/servo motor control
 * Includes a native FW+lathe emulator for hardware-free testing with the Python GUI
 
@@ -29,7 +29,7 @@ This project (along with the corresponding UI SW project) was hard forked from t
 ### Requirements
 
 * CMake & C/C++ toolchain (e.g. `arm-none-eabi-gcc`, `make`)
-* ST-Link v2 or Raspberry Pi with OpenOCD
+* ST-Link v2
 
 ### Build
 
@@ -48,19 +48,19 @@ rm -rf build
 
 ### Flash
 
-* **ST‑Link V2**:
+**ST‑Link V2**, over SWD:
 
-  ```bash
-  st-flash --format ihex write build/reflex-fw.hex
-  ```
+```bash
+st-flash --format ihex write build/reflex-fw.hex
+```
 
-* **Raspberry Pi + OpenOCD**:
-
-  ```bash
-  openocd -f ./raspberry.cfg
-  ```
-
-  The default `raspberry.cfg` configures SWD over GPIO pins 24/25 + GND. Ensure GND wiring is the **same length** as SWCLK/SWDIO for reliability. Modify the GPIO pins in `raspberry.cfg` if needed.
+> Bitbanging SWD from a Raspberry Pi's GPIO used to be documented here via
+> `raspberry.cfg`. It has been removed: that config uses OpenOCD's
+> `bcm2835gpio` driver, which memory-maps the GPIO block on the SoC — and the
+> Pi 5 moved GPIO onto the RP1 southbridge, so the driver has nothing to map and
+> cannot work there at all. It was never used in practice. `raspberrypi5.cfg`
+> holds an untested `linuxgpiod` equivalent for whenever the boards get respun;
+> read its header before trusting it.
 
 ---
 

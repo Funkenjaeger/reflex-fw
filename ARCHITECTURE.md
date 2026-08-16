@@ -277,9 +277,10 @@ Field-level semantics (units, sign conventions, who writes what) are documented 
 ### Flashing
 
 ```bash
-# ST-Link
+# ST-Link v2, over SWD
 st-flash --format ihex write reflex.hex
-
-# Raspberry Pi + OpenOCD
-openocd -f ./raspberry.cfg
 ```
+
+Bitbanging SWD from a Raspberry Pi's GPIO (`raspberry.cfg`) was listed here and
+has been removed — it uses OpenOCD's `bcm2835gpio` driver, which cannot work on
+a Pi 5. See the README, and `raspberrypi5.cfg` for an untested replacement.
