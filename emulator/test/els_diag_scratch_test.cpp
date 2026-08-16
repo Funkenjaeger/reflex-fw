@@ -108,10 +108,15 @@ int main(void)
 
     RampsStart(&data);
 
-    /* Guards the one-time bump. Anything appended to elsStop_t after this must
-     * move it again, and reflex-ui's ELS_PROTOCOL_VERSION with it. */
-    check(data.shared.elsStop.protocolVersion == 2,
-          "protocolVersion is 2 (scratchpad map)");
+    /* Guards the bump. Anything appended to elsStop_t after this must move it
+     * again, and reflex-ui's ELS_PROTOCOL_VERSION with it.
+     *
+     * It has now done that job once for real: 2 -> 3 on 2026-08-16, when the
+     * manual reference latch appended latchCommand/latchSeq. This assertion is
+     * what failed and forced the bump, rather than three different map layouts
+     * quietly sharing the number 2. */
+    check(data.shared.elsStop.protocolVersion == 3,
+          "protocolVersion is 3 (scratchpad + manual latch map)");
 
 #ifdef ELS_DIAG_SCRATCH
     /* Pinned to a SPECIFIC schema, not "any nonzero". A probe revision changes
