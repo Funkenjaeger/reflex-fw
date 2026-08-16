@@ -26,16 +26,20 @@ This project (along with the corresponding UI SW project) was hard forked from t
 
 ## 🛠️ Build & Flash
 
-The ARM toolchain and the ST-Link usually live on **different machines** — the
-Pi that runs the UI has the debug probe hanging off it, and the cross-compiler is
-wherever you write code. `scripts/flash.sh` spans that gap so you do not have to
-think about it.
+Build and flash on **the machine with the ST-Link plugged into it**. For this
+project that is the Pi that also runs the UI, which is perfectly capable of
+compiling the firmware — and doing both in one place means the binary on the
+target cannot be a different revision from the checkout in front of you.
+`git rev-parse HEAD` there *is* what is flashed.
 
 ### Requirements
 
-**Build host:** CMake and an ARM toolchain (`arm-none-eabi-gcc`, `make`).
-**Probe host:** an ST-Link v2 on USB and `openocd` (`sudo apt install openocd`);
-passwordless SSH to it from the build host. The two may be the same machine.
+```bash
+sudo apt install gcc-arm-none-eabi cmake build-essential openocd
+```
+
+Plus an ST-Link v2 on USB. The `openocd` package installs udev rules granting
+the `plugdev` group access, so flashing needs no `sudo`.
 
 ### Build and flash
 
@@ -43,19 +47,23 @@ passwordless SSH to it from the build host. The two may be the same machine.
 ./scripts/flash.sh
 ```
 
-That builds, copies, verifies the transfer, flashes over SWD, and records what it
-did. Add `--diag` for the diagnostic variant, `--host NAME` to target something
-other than `elspi`, `--dry-run` to do everything except the write.
+That builds, flashes over SWD, and records what it did.
 
 ```bash
 ./scripts/flash.sh --diag        # with the ELS settle-trace probe
+./scripts/flash.sh --dry-run     # everything except the write
 ./scripts/build.sh               # build only, no flashing
 ./scripts/build.sh --diag --clean
 ```
 
-**It rebuilds every time by default.** That is deliberate: with the build on one
-machine and the flash on another, a copy that is quietly one revision behind is
-the easiest mistake to make and the hardest to notice. `--no-build` opts out.
+**It rebuilds every time by default.** `--no-build` opts out. A stale binary is
+the easiest mistake to make and the hardest to notice; rebuilding costs seconds.
+
+**`--host NAME` builds here and flashes there** over SSH, for the case where the
+probe host genuinely cannot build. It adds a copy and a checksum — a transfer
+that can silently truncate is worth verifying before it is written to the
+controller of a machine with moving parts. Prefer the local path: it makes that
+whole failure mode, and the version ambiguity that comes with it, not exist.
 
 **Two variants, two build directories.** `build/` is the release firmware.
 `build-diag/` adds `-DELS_DIAG_SCRATCH`, compiling in the ELS settle-trace probe

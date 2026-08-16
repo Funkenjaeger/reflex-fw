@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # Build and flash the firmware, in one command.
 #
-#   ./scripts/flash.sh            release build -> elspi
-#   ./scripts/flash.sh --diag     diagnostic build (settle-trace probe)
-#   ./scripts/flash.sh --no-build flash whatever is already built
-#   ./scripts/flash.sh --host X   target a different machine
+#   ./scripts/flash.sh              release build, flash locally
+#   ./scripts/flash.sh --diag       diagnostic build (ELS settle-trace probe)
+#   ./scripts/flash.sh --no-build   flash what is already built
+#   ./scripts/flash.sh --dry-run    everything except the write
+#   ./scripts/flash.sh --host NAME  build here, flash on NAME over ssh
 #
-# IT BUILDS FIRST BY DEFAULT, and that is the point. The ARM toolchain lives on
-# the build host while the ST-Link hangs off the Pi, so "flash" has always meant
-# build here, copy there, run openocd there -- three steps across two machines,
-# with the copy silently able to be a version behind. Building every time costs
-# a few seconds and removes the entire class of "which binary is actually on the
-# machine".
+# LOCAL IS THE DEFAULT, and that is the whole point. Run this on the machine
+# with the ST-Link plugged in -- which for this project is the Pi that also runs
+# the UI -- and there is no copy, no second machine, and no way for the binary on
+# the target to be a different revision from the checkout you are looking at.
+# `git rev-parse HEAD` there IS what is flashed.
 #
-# IT RECORDS WHAT IT FLASHED, in ~/firmware/flashed.json on the target. Working
-# out what firmware was on this lathe once took an afternoon of archaeology
-# across build-artifact timestamps on a laptop that was powered off. One line of
-# JSON per flash makes that a lookup. Nothing reads this file yet; it exists so
-# the question has an answer at all.
+# --host exists for the case where the probe host genuinely cannot build (no ARM
+# toolchain, or you want the faster machine to compile). It adds a copy and a
+# checksum, because a transfer that can silently truncate is worth verifying
+# before it gets written to the controller of a machine with moving parts.
+#
+# EITHER WAY IT REBUILDS FIRST. --no-build opts out. A stale binary is the
+# easiest mistake to make and the hardest to notice, and rebuilding costs
+# seconds.
+#
+# IT RECORDS WHAT IT FLASHED, in ~/firmware/flashed.json on the probe host.
+# Working out what firmware was on this lathe once took an afternoon of
+# archaeology across build-artifact timestamps on a machine that was powered
+# off. One line of JSON per flash makes that a lookup. Nothing reads it yet; it
+# exists so the question has an answer.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +34,7 @@ cd "$REPO"
 
 VARIANT=release
 BUILD_DIR=build
-HOST=elspi
+HOST=""          # empty = flash on this machine
 DO_BUILD=1
 DRY=0
 
@@ -35,17 +44,21 @@ while [ $# -gt 0 ]; do
         --no-build) DO_BUILD=0 ;;
         --host)     HOST="${2:?--host needs a value}"; shift ;;
         --dry-run)  DRY=1 ;;
-        -h|--help)
-            sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
-            exit 0 ;;
+        -h|--help)  sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
 done
 
 if [ "$DO_BUILD" = 1 ]; then
-    if [ "$VARIANT" = diagnostic ]; then "$REPO/scripts/build.sh" --diag
-    else "$REPO/scripts/build.sh"; fi
+    # NOT `test && a || b` -- if the diagnostic build FAILED, that idiom falls
+    # through and quietly builds release instead, which is the precise
+    # wrong-variant confusion this script exists to prevent.
+    if [ "$VARIANT" = diagnostic ]; then
+        "$REPO/scripts/build.sh" --diag
+    else
+        "$REPO/scripts/build.sh"
+    fi
     echo
 fi
 
@@ -57,8 +70,8 @@ DIRTY=false
 git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || DIRTY=true
 
 # A dirty tree WARNS rather than blocks. Refusing would just get worked around,
-# and iterating on the machine is a legitimate thing to do -- but it does mean
-# the revision alone no longer identifies the binary, so the manifest records it.
+# and iterating at the machine is legitimate -- but the revision alone then stops
+# identifying the binary, so the manifest records it.
 if [ "$DIRTY" = true ]; then
     echo "WARNING: working tree is dirty. '$REV' does not fully identify this"
     echo "         binary; recording it as ${REV}-dirty."
@@ -66,68 +79,75 @@ if [ "$DIRTY" = true ]; then
 fi
 
 MD5="$(md5sum "$ELF" | cut -d' ' -f1)"
-REMOTE_ELF="firmware/reflex-fw-${VARIANT}.elf"
 
-# Preflight the connection before doing anything that looks like progress.
-# Failing here with an explanation beats failing three steps in with a raw
-# resolver error. Note SSH config is per-context: a host alias that works in a
-# Windows terminal does not exist inside WSL, which has its own ~/.ssh.
-if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" true 2>/dev/null; then
-    cat >&2 <<EOF
+if [ -n "$HOST" ]; then
+    # Preflight before doing anything that looks like progress. Note ssh config
+    # is per-context: a host alias that works in a Windows terminal does not
+    # exist inside WSL, which has its own ~/.ssh.
+    if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" true 2>/dev/null; then
+        cat >&2 <<EOF
 cannot reach '$HOST' over ssh from this machine.
 
-Needs passwordless ssh to the machine with the ST-Link attached. Check that:
-  - the host name resolves here (ssh config alias, /etc/hosts, or mDNS)
-  - your key is authorized there, in THIS shell's ssh context
+Needs passwordless ssh to the machine with the ST-Link attached: the host must
+resolve here, and your key must be authorized there in THIS shell's ssh context.
 
-Override the target with:  $(basename "$0") --host <name-or-ip>
+Simpler option: install the ARM toolchain on the probe host and run this script
+there with no --host at all.
 EOF
-    exit 1
+        exit 1
+    fi
+    TARGET_ELF="firmware/reflex-fw-${VARIANT}.elf"
+    RUN=(ssh "$HOST")
+    WHERE="$HOST"
+else
+    TARGET_ELF="$REPO/$ELF"
+    RUN=(bash -c)
+    WHERE="this machine"
 fi
 
-echo "flashing ${VARIANT^^} (${REV}$([ "$DIRTY" = true ] && echo -dirty)) -> ${HOST}"
+echo "flashing ${VARIANT^^} (${REV}$([ "$DIRTY" = true ] && echo -dirty)) on ${WHERE}"
 
-ssh "$HOST" 'mkdir -p ~/firmware'
-scp -q "$ELF" "$HOST:$REMOTE_ELF"
-
-# Verify the copy before flashing it. A truncated scp that then gets written to
-# the controller of a machine with moving parts is not a failure mode worth
-# saving two seconds on.
-REMOTE_MD5="$(ssh "$HOST" "md5sum $REMOTE_ELF | cut -d' ' -f1")"
-[ "$MD5" = "$REMOTE_MD5" ] || {
-    echo "TRANSFER CORRUPT: local $MD5 != remote $REMOTE_MD5 -- not flashing" >&2
-    exit 1
-}
+if [ -n "$HOST" ]; then
+    ssh "$HOST" 'mkdir -p ~/firmware'
+    scp -q "$ELF" "$HOST:$TARGET_ELF"
+    REMOTE_MD5="$(ssh "$HOST" "md5sum $TARGET_ELF | cut -d' ' -f1")"
+    [ "$MD5" = "$REMOTE_MD5" ] || {
+        echo "TRANSFER CORRUPT: local $MD5 != remote $REMOTE_MD5 -- not flashing" >&2
+        exit 1
+    }
+else
+    mkdir -p ~/firmware
+fi
 
 # 'transport select swd' is explicit to suppress openocd's auto-select
-# deprecation warning. 'reset run' leaves the target executing rather than
-# halted -- a halted lathe controller with the UI still polling it looks like a
-# comms fault and invites someone to start debugging the wrong thing.
+# deprecation warning. 'reset' leaves the target executing rather than halted --
+# a halted lathe controller with the UI still polling it looks like a comms
+# fault and invites debugging the wrong thing.
 OPENOCD_CMD="openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
     -c 'transport select swd' \
-    -c 'program $REMOTE_ELF verify reset exit'"
+    -c 'program $TARGET_ELF verify reset exit'"
 
 if [ "$DRY" = 1 ]; then
     echo
-    echo "DRY RUN -- everything above actually happened (build, copy, checksum"
-    echo "verified). Stopping before the write. Would now run on ${HOST}:"
+    echo "DRY RUN -- everything above actually happened. Stopping before the"
+    echo "write. Would now run on ${WHERE}:"
     echo
     echo "  $OPENOCD_CMD"
-    echo
     exit 0
 fi
 
-ssh "$HOST" "$OPENOCD_CMD"
+"${RUN[@]}" "$OPENOCD_CMD"
 
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-ssh "$HOST" "printf '%s\n' '{\"utc\":\"$STAMP\",\"variant\":\"$VARIANT\",\"rev\":\"$REV\",\"dirty\":$DIRTY,\"md5\":\"$MD5\",\"elf\":\"$REMOTE_ELF\"}' >> ~/firmware/flashed.json"
+MANIFEST="{\"utc\":\"$STAMP\",\"variant\":\"$VARIANT\",\"rev\":\"$REV\",\"dirty\":$DIRTY,\"md5\":\"$MD5\"}"
+"${RUN[@]}" "printf '%s\n' '$MANIFEST' >> ~/firmware/flashed.json"
 
 echo
 echo "flashed  ${VARIANT^^}  rev ${REV}$([ "$DIRTY" = true ] && echo " (dirty)")"
-echo "  recorded in ${HOST}:~/firmware/flashed.json"
+echo "  recorded in ${WHERE}:~/firmware/flashed.json"
 if [ "$VARIANT" = diagnostic ]; then
     echo
     echo "  The UI reconnects on its own after the reset. Confirm it logs"
     echo "  'ELS diagnostic recorder active' -- 'dormant' means the flash did not"
-    echo "  take, or reflex-ui on the target predates the recorder."
+    echo "  take, or reflex-ui on that machine predates the recorder."
 fi
