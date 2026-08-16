@@ -65,6 +65,45 @@
 #define ELS_DIAG_SCHEMA_TAKEUP_SETTLE 1     /* RETIRED -- see v2 */
 #define ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2 2
 
+/* WHICH probe is compiled in, selected by the build as
+ * -DELS_DIAG_PROBE=ELS_DIAG_SCHEMA_<NAME>. scripts/build.sh --diag=<name> is the
+ * supported way to set it; scripts/lib/diag.sh derives the legal names from the
+ * schema defines above, so the script cannot offer a probe the firmware does not
+ * have.
+ *
+ * ONE PROBE AT A TIME, AND THAT IS A PROPERTY OF THE SHAPE, NOT A RULE TO
+ * REMEMBER. Every probe writes the same 64 reserved registers; two of them
+ * compiled in together would interleave their fields and produce a capture that
+ * looks well-formed and means nothing. Because the selection is a single macro
+ * holding a single value, "two probes at once" is not a state this build system
+ * can represent -- there is no combination of flags that expresses it. A
+ * documented prohibition would have needed somebody to read the document.
+ *
+ * ELS_DIAG_SCRATCH is DERIVED, never passed. It is the "some probe is active"
+ * umbrella the shared plumbing keys off; the per-probe capture code keys off
+ * ELS_DIAG_PROBE. Passing ELS_DIAG_SCRATCH by hand is rejected below rather than
+ * silently reserving the block for a probe that does not exist. */
+#if defined(ELS_DIAG_SCRATCH) && !defined(ELS_DIAG_PROBE)
+#error "ELS_DIAG_SCRATCH is derived, not passed. Use scripts/build.sh --diag=<probe>; see DIAG.md."
+#endif
+
+#ifdef ELS_DIAG_PROBE
+/* A misspelled macro name expands to an undefined identifier, which the
+ * preprocessor evaluates to 0 -- i.e. silently to "no probe" while the build
+ * still calls itself diagnostic. Rejecting NONE explicitly is what turns that
+ * into a compile error instead of a diagnostic build that measures nothing. */
+#if ELS_DIAG_PROBE == ELS_DIAG_SCHEMA_NONE
+#error "ELS_DIAG_PROBE is unset, misspelled, or NONE. Use scripts/build.sh --diag=<probe>; see DIAG.md."
+#elif ELS_DIAG_PROBE == ELS_DIAG_SCHEMA_TAKEUP_SETTLE
+#error "ELS_DIAG_SCHEMA_TAKEUP_SETTLE is RETIRED; use takeup-settle-v2. See DIAG.md."
+#elif ELS_DIAG_PROBE == ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2
+/* recognised */
+#else
+#error "unknown ELS_DIAG_PROBE. Register the schema id in Ramps.h and add it to this chain; see DIAG.md."
+#endif
+#define ELS_DIAG_SCRATCH 1
+#endif
+
 /* Why the capture stopped. The distinction matters: a capture that ran out of
  * buckets did not finish measuring, and its last bucket is a floor rather than
  * a result. */

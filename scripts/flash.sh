@@ -2,7 +2,7 @@
 # Build and flash the firmware, in one command.
 #
 #   ./scripts/flash.sh              release build, flash locally
-#   ./scripts/flash.sh --diag       diagnostic build (ELS settle-trace probe)
+#   ./scripts/flash.sh --diag=NAME  diagnostic build carrying ONE probe (DIAG.md)
 #   ./scripts/flash.sh --no-build   flash what is already built
 #   ./scripts/flash.sh --dry-run    everything except the write
 #   ./scripts/flash.sh --host NAME  build here, flash on NAME over ssh
@@ -32,19 +32,43 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
+# shellcheck source=lib/diag.sh
+. "$REPO/scripts/lib/diag.sh"
+
 VARIANT=release
 BUILD_DIR=build
+PROBE=""
 HOST=""          # empty = flash on this machine
 DO_BUILD=1
 DRY=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --diag)     VARIANT=diagnostic; BUILD_DIR=build-diag ;;
+        --diag)
+            echo "--diag requires a probe: --diag=<name>" >&2
+            diag_usage_probes "$REPO"
+            exit 2 ;;
+        --diag=*)
+            PROBE="${1#--diag=}"
+            VARIANT=diagnostic
+            BUILD_DIR="$(diag_build_dir "$PROBE")"
+            # Validated here as well as in build.sh, because --no-build skips
+            # build.sh entirely. Without this, `--diag=typo --no-build` would
+            # sail past every check and flash whatever happened to be sitting in
+            # a directory named after the typo -- or fail with a confusing
+            # "no such ELF" instead of "no such probe".
+            if ! diag_resolve "$REPO" "$PROBE" >/dev/null; then
+                echo "unknown diagnostic probe: $PROBE" >&2
+                diag_usage_probes "$REPO"
+                exit 2
+            fi ;;
         --no-build) DO_BUILD=0 ;;
         --host)     HOST="${2:?--host needs a value}"; shift ;;
         --dry-run)  DRY=1 ;;
-        -h|--help)  sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help)
+            sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+            diag_usage_probes "$REPO"
+            exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -55,7 +79,7 @@ if [ "$DO_BUILD" = 1 ]; then
     # through and quietly builds release instead, which is the precise
     # wrong-variant confusion this script exists to prevent.
     if [ "$VARIANT" = diagnostic ]; then
-        "$REPO/scripts/build.sh" --diag
+        "$REPO/scripts/build.sh" "--diag=$PROBE"
     else
         "$REPO/scripts/build.sh"
     fi
@@ -139,7 +163,12 @@ fi
 "${RUN[@]}" "$OPENOCD_CMD"
 
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-MANIFEST="{\"utc\":\"$STAMP\",\"variant\":\"$VARIANT\",\"rev\":\"$REV\",\"dirty\":$DIRTY,\"md5\":\"$MD5\"}"
+# `probe` is recorded alongside `variant` because "diagnostic" alone stopped
+# being a complete answer once there could be more than one probe: the schema
+# decides what every field in the scratchpad means, so a manifest that omits it
+# cannot tell you what a capture you pulled last week was measuring. null for
+# release builds -- an absent probe, stated, rather than a missing key.
+MANIFEST="{\"utc\":\"$STAMP\",\"variant\":\"$VARIANT\",\"probe\":$([ -n "$PROBE" ] && printf '"%s"' "$PROBE" || printf 'null'),\"rev\":\"$REV\",\"dirty\":$DIRTY,\"md5\":\"$MD5\"}"
 "${RUN[@]}" "printf '%s\n' '$MANIFEST' >> ~/firmware/flashed.json"
 
 echo

@@ -118,16 +118,31 @@ int main(void)
      * what the block's fields mean, and reflex-ui mirrors those meanings -- so
      * bumping it should cost somebody a deliberate edit here rather than sliding
      * through green. This caught the v1 -> v2 bump on 2026-08-16. */
-    check(data.shared.elsStop.diagSchema == ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2,
-          "flagged build advertises the take-up settle probe (v2)");
+    /* Asserted against the LITERAL wire value, deliberately, not against
+     * ELS_DIAG_PROBE. Ramps.c now publishes `diagSchema = ELS_DIAG_PROBE`, so
+     * checking those two agree is a tautology that would hold no matter what
+     * number came out -- a check structurally incapable of failing. The literal
+     * is the number reflex-ui mirrors and refuses when unrecognised, so pinning
+     * it here is what makes a renumbering cost a deliberate edit on both sides.
+     *
+     * The #else is not decoration: it makes "added a probe, wrote no assertions
+     * for it" a BUILD failure rather than a target that runs and checks nothing.
+     * A new probe must land its own arm here. */
+#if ELS_DIAG_PROBE == ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2
+    check(data.shared.elsStop.diagSchema == 2,
+          "take-up settle v2 publishes wire schema 2");
+    check(data.shared.elsStop.diagBucketCount == ELS_DIAG_TRACE_BUCKETS,
+          "take-up settle v2 publishes its bucket count");
+#else
+#error "this probe has no assertions in els_diag_scratch_test.cpp -- add an arm above"
+#endif
     check(data.shared.elsStop.diagEndReason == 0,
           "end reason starts cleared (no stale verdict beside a fresh trace)");
     check(data.shared.elsStop.diagBucketTicks > 0,
           "flagged build publishes bucket width (host must not assume the ISR rate)");
-    check(data.shared.elsStop.diagBucketCount == ELS_DIAG_TRACE_BUCKETS,
-          "flagged build publishes bucket count");
-    printf("=== %s (ELS_DIAG_SCRATCH build) ===\n",
-           failures == 0 ? "ALL PASS" : "FAILURES");
+    printf("=== %s (probe build, schema %u) ===\n",
+           failures == 0 ? "ALL PASS" : "FAILURES",
+           (unsigned)data.shared.elsStop.diagSchema);
 #else
     /* THE RELEASE ASSERTION. A non-zero schema here means a probe leaked into a
      * build that must not carry one -- and because protocolVersion does not move

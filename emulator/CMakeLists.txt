@@ -177,11 +177,17 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
 target_link_libraries(els_cal_nudge_refusal_test m pthread)
 add_test(NAME els_cal_nudge_refusal_test COMMAND els_cal_nudge_refusal_test)
 
-# Diagnostic scratchpad leak guard. Compiles into EITHER configuration and
-# asserts the opposite thing in each: a release build must advertise no probe
-# (diagSchema == 0), a -DELS_DIAG_SCRATCH build must advertise one and publish
-# its trace geometry. A one-sided test here would pass just as happily against a
-# flag that does nothing, so both halves exist on purpose.
+# Diagnostic scratchpad leak guard. The source asserts the OPPOSITE thing in
+# each configuration: a release build must advertise no probe (diagSchema == 0),
+# a probe build must advertise its own schema and publish its trace geometry.
+#
+# It is compiled TWICE, and that is the point. Until 2026-08-16 this comment
+# claimed "both halves exist on purpose" while only the release target was ever
+# built -- the #ifdef ELS_DIAG_SCRATCH half had never been compiled, in CI or
+# anywhere else. So the half that proves the flag DOES something was the half
+# that did not run, and the release-only target would have passed just as
+# happily against a flag wired to nothing. Adding a probe means adding a target
+# here; a probe with no target is a probe nothing tests.
 add_executable(els_diag_scratch_test
     ${CMAKE_SOURCE_DIR}/test/els_diag_scratch_test.cpp
     ${FW_DIR}/Core/Src/Ramps.c)
@@ -189,3 +195,16 @@ set_source_files_properties(${FW_DIR}/Core/Src/Ramps.c
     PROPERTIES LANGUAGE C COMPILE_FLAGS "-std=gnu11")
 target_link_libraries(els_diag_scratch_test m pthread)
 add_test(NAME els_diag_scratch_test COMMAND els_diag_scratch_test)
+
+# The diagnostic half, per probe. ELS_DIAG_PROBE is set the same way
+# scripts/build.sh sets it, so this target exercises the real selection
+# mechanism rather than a test-only shortcut -- including the #error chain in
+# Ramps.h, which fails the BUILD if the probe is unregistered or misspelled.
+add_executable(els_diag_scratch_takeup_settle_v2_test
+    ${CMAKE_SOURCE_DIR}/test/els_diag_scratch_test.cpp
+    ${FW_DIR}/Core/Src/Ramps.c)
+target_compile_definitions(els_diag_scratch_takeup_settle_v2_test
+    PRIVATE ELS_DIAG_PROBE=ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2)
+target_link_libraries(els_diag_scratch_takeup_settle_v2_test m pthread)
+add_test(NAME els_diag_scratch_takeup_settle_v2_test
+    COMMAND els_diag_scratch_takeup_settle_v2_test)

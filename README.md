@@ -58,10 +58,10 @@ That builds, flashes over SWD, and records what it did.
 > flashed before believing it took.
 
 ```bash
-./scripts/flash.sh --diag        # with the ELS settle-trace probe
+./scripts/flash.sh --diag=NAME   # with a diagnostic probe compiled in
 ./scripts/flash.sh --dry-run     # everything except the write
 ./scripts/build.sh               # build only, no flashing
-./scripts/build.sh --diag --clean
+./scripts/build.sh --diag        # lists the available probes
 ```
 
 **It rebuilds every time by default.** `--no-build` opts out. A stale binary is
@@ -73,12 +73,16 @@ that can silently truncate is worth verifying before it is written to the
 controller of a machine with moving parts. Prefer the local path: it makes that
 whole failure mode, and the version ambiguity that comes with it, not exist.
 
-**Two variants, two build directories.** `build/` is the release firmware.
-`build-diag/` adds `-DELS_DIAG_SCRATCH`, compiling in the ELS settle-trace probe
-— **never** put that on `dev-staging`, `dev` or `main`. They are separate
-directories so the flag can never depend on what the last `cmake` invocation
-happened to say. At runtime the `elsStop.diagSchema` register tells you which one
-is running, and the UI logs it at connect.
+**Release and diagnostic builds live in separate directories.** `build/` is the
+release firmware; each `--diag=NAME` build gets its own directory, so the flag
+can never depend on what the last `cmake` invocation happened to say. A
+diagnostic build compiles in **one** measurement probe and must **never** reach
+`dev-staging`, `dev` or `main`. At runtime the `elsStop.diagSchema` register says
+which probe is running (`0` = none), and the UI logs it at connect.
+
+Which probes exist, what they measure, how to add or retire one, and why only one
+can be compiled in at a time: **[DIAG.md](DIAG.md)**. `./scripts/build.sh --diag`
+with no name lists them.
 
 **Every flash is recorded** in `~/firmware/flashed.json` on the probe host: UTC
 timestamp, variant, git revision, whether the tree was dirty, and the ELF's MD5.

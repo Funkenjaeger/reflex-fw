@@ -247,7 +247,11 @@ void RampsStart(rampsHandler_t *rampsData) {
    * the struct happened to be initialised with. A reader that finds 0 must not
    * interpret the block; see the note at elsStop_t. */
 #ifdef ELS_DIAG_SCRATCH
-  rampsData->shared.elsStop.diagSchema      = ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2;
+  /* Published straight from the selection macro rather than a literal. The
+   * register's whole job is to tell a reader which probe it is looking at, so a
+   * hardcoded schema here could disagree with the probe actually compiled in --
+   * the one lie this field must never be able to tell. */
+  rampsData->shared.elsStop.diagSchema      = ELS_DIAG_PROBE;
   rampsData->shared.elsStop.diagBucketTicks = ELS_DIAG_BUCKET_TICKS;
   rampsData->shared.elsStop.diagBucketCount = ELS_DIAG_TRACE_BUCKETS;
   /* Explicitly cleared rather than left to BSS. A host that connects before the
