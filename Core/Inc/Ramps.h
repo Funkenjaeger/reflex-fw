@@ -62,7 +62,14 @@
  * never renumber. A stale reader that recognises an old id must not silently
  * accept a new probe's data under it. 0 means no probe. */
 #define ELS_DIAG_SCHEMA_NONE 0
-#define ELS_DIAG_SCHEMA_TAKEUP_SETTLE 1
+#define ELS_DIAG_SCHEMA_TAKEUP_SETTLE 1     /* RETIRED -- see v2 */
+#define ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2 2
+
+/* Why the capture stopped. The distinction matters: a capture that ran out of
+ * buckets did not finish measuring, and its last bucket is a floor rather than
+ * a result. */
+#define ELS_DIAG_END_PULSE  1   /* servo drove again -- settling is over */
+#define ELS_DIAG_END_WINDOW 2   /* ran out of buckets while still quiet-or-moving */
 
 
 typedef struct {
@@ -177,10 +184,12 @@ typedef struct {
   uint16_t diagSeq;            // READ-ONLY (firmware-owned): increments once per COMPLETED capture. Edge-detect this; there is deliberately no "capture in progress" register to poll
   uint16_t diagBucketTicks;    // READ-ONLY (firmware-owned): ISR ticks summed into each diagTrace bucket. PUBLISHED so the host never has to assume the ISR rate — the repo has disagreed with itself about that rate by 10x
   uint16_t diagBucketCount;    // READ-ONLY (firmware-owned): populated diagTrace entries, for the same reason
-  int32_t  diagSettleTicks;    // READ-ONLY (firmware-owned): ticks from capture start to the LAST tick that saw nonzero dZ. This is the measurement ELS_SLIP_SETTLE_TICKS is currently a guess at
-  int32_t  diagNetCounts;      // READ-ONLY (firmware-owned): signed Z counts summed across the whole capture
+  int32_t  diagSettleTicks;    // READ-ONLY (firmware-owned): ticks from capture start to the LAST tick that saw nonzero dZ. THE measurement ELS_SLIP_SETTLE_TICKS is a guess at — meaningful in v2, where the capture stops before the pass starts
+  int32_t  diagNetCounts;      // READ-ONLY (firmware-owned): signed Z counts summed across the capture
   int16_t  diagTrace[ELS_DIAG_TRACE_BUCKETS];  // READ-ONLY (firmware-owned): per-bucket SIGNED sum of dZ. Signed rather than magnitude on purpose — encoder dither cancels, real motion does not, which is exactly the distinction a quiescence test needs and the reason to prefer net displacement over summed |dZ|
-  uint16_t diagReserved[6];    // pads the block to a fixed 128 bytes so its size never depends on which probe is in it
+  uint16_t diagCaptureTicks;   // READ-ONLY (firmware-owned): ticks the capture actually ran, i.e. how long the servo stayed silent after the take-up. Distinct from diagSettleTicks, which is when Z last MOVED
+  uint16_t diagEndReason;      // READ-ONLY (firmware-owned): ELS_DIAG_END_*. A window-full capture did not finish measuring; treat its tail as a floor, not a result
+  uint16_t diagReserved[4];    // pads the block to a fixed 128 bytes so its size never depends on which probe is in it
 } elsStop_t;
 
 typedef struct {

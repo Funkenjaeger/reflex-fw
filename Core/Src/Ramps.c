@@ -129,8 +129,22 @@
  * and runs for the full window regardless of what the gate decides, so the
  * trace covers the confirm decision rather than stopping at it. */
 /* Schema ids live in Ramps.h -- they are part of the register contract that
- * reflex-ui mirrors, not a detail of this file. */
-#define ELS_DIAG_BUCKET_TICKS 100   /* 1 ms at the 100 kHz ISR rate */
+ * reflex-ui mirrors, not a detail of this file.
+ *
+ * v2, after the 2026-08-16 machine run. v1 started at commanded-take-up
+ * completion and then ran unconditionally for its whole window -- so it kept
+ * recording after the gate confirmed and the PASS STARTED, and most of every
+ * trace was the carriage traversing under sync at a flat ~1.9 counts/ms. That
+ * is not a settle tail; a settle tail decays. diagSettleTicks was worse than
+ * useless: it reported the last nonzero dZ, which once the pass is running is
+ * always "just before the window closed" (measured: 4954-4995 out of 5000).
+ *
+ * v2 ends the capture the moment the servo issues its next step pulse. That is
+ * exactly the boundary between settling and being driven again, and it makes
+ * every field mean what its name says. Buckets drop 100 ticks -> 10 so the
+ * sub-millisecond tail is resolvable: v1 showed 3-6 whole buckets of ZERO at
+ * 1 ms each, which bounds the settle below 3 ms but cannot see inside it. */
+#define ELS_DIAG_BUCKET_TICKS 10   /* ~0.097 ms at the measured 103 kHz ISR rate */
 
 #ifdef EMULATOR_BUILD
 #include "emulator_state.h"
@@ -233,9 +247,17 @@ void RampsStart(rampsHandler_t *rampsData) {
    * the struct happened to be initialised with. A reader that finds 0 must not
    * interpret the block; see the note at elsStop_t. */
 #ifdef ELS_DIAG_SCRATCH
-  rampsData->shared.elsStop.diagSchema      = ELS_DIAG_SCHEMA_TAKEUP_SETTLE;
+  rampsData->shared.elsStop.diagSchema      = ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2;
   rampsData->shared.elsStop.diagBucketTicks = ELS_DIAG_BUCKET_TICKS;
   rampsData->shared.elsStop.diagBucketCount = ELS_DIAG_TRACE_BUCKETS;
+  /* Explicitly cleared rather than left to BSS. A host that connects before the
+   * first take-up must see "no capture yet", not whatever was in RAM -- and on
+   * this part BSS happens to be zero, which would make the invariant look held
+   * while nothing actually enforced it. */
+  rampsData->shared.elsStop.diagCaptureTicks = 0;
+  rampsData->shared.elsStop.diagEndReason    = 0;
+  rampsData->shared.elsStop.diagSettleTicks  = 0;
+  rampsData->shared.elsStop.diagNetCounts    = 0;
   rampsData->diagState                      = 0;
   rampsData->diagCaptureTick                = 0;
 #else
@@ -898,8 +920,12 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
          * tick whose timing this probe exists to measure. Do not move it. */
         data->diagState       = 1;
         data->diagCaptureTick = 0;
-        shared->elsStop.diagSettleTicks = 0;
-        shared->elsStop.diagNetCounts   = 0;
+        shared->elsStop.diagSettleTicks  = 0;
+        shared->elsStop.diagNetCounts    = 0;
+        /* Cleared too, so a reader can never see the PREVIOUS capture's outcome
+         * beside this one's trace if it reads mid-flight. */
+        shared->elsStop.diagCaptureTicks = 0;
+        shared->elsStop.diagEndReason    = 0;
         for (int b = 0; b < ELS_DIAG_TRACE_BUCKETS; b++) {
           shared->elsStop.diagTrace[b] = 0;
         }
@@ -1015,38 +1041,56 @@ void SynchroRefreshTimerIsr(rampsHandler_t *data) {
   }
 
 #ifdef ELS_DIAG_SCRATCH
-  /* Take-up settle trace. Same placement as the attribution blocks above and for
-   * the same reason: this is the only point in the ISR where dZ is this tick's.
+  /* Take-up settle trace, v2. Same placement as the attribution blocks above and
+   * for the same reason: this is the only point in the ISR where dZ is this
+   * tick's.
    *
-   * DELIBERATELY NOT GATED ON takeupPending. The gate clears that the instant it
-   * confirms, and the tail of this window is the entire point — it is where we
-   * find out whether the carriage is still moving after the decision, and
-   * whether Z ever goes properly quiet or dithers forever. Gating on
-   * takeupPending would truncate the trace at exactly the moment that matters
-   * and would produce a confident, useless answer. The capture runs its full
-   * length and stops on its own tick budget. */
+   * IT ENDS ON THE SERVO'S NEXT PULSE, and that is the whole correction over v1.
+   * v1 was deliberately not gated on takeupPending, on the reasoning that the
+   * interesting part is what Z does AFTER the gate decides. True, but it ran on
+   * unconditionally afterwards -- and what comes after the decision is the PASS,
+   * so most of every v1 trace was the carriage traversing under sync at a flat
+   * ~1.9 counts/ms. Flat is the tell: a settle tail decays.
+   *
+   * The next commanded pulse is the exact boundary between "still settling from
+   * the take-up" and "being driven again", and it does not depend on which
+   * firmware state machine happens to clear which flag first. Checked BEFORE
+   * accumulating, so the driving tick itself is never counted as settle. */
   if (data->diagState == 2) {
-    uint16_t zIdx = shared->elsStop.scaleIndex;
-    int32_t  dZ   = data->scalesDeltaPos[zIdx].delta * shared->scales[zIdx].scaleDir;
+    uint16_t zIdx   = shared->elsStop.scaleIndex;
+    int32_t  dZ     = data->scalesDeltaPos[zIdx].delta * shared->scales[zIdx].scaleDir;
+    int32_t  dServo = (int32_t)(shared->servo.currentSteps - servoStepsBeforePulse);
 
-    uint32_t bucket = data->diagCaptureTick / ELS_DIAG_BUCKET_TICKS;
-    if (bucket < (uint32_t)ELS_DIAG_TRACE_BUCKETS) {
-      /* int16 per bucket. Per-tick dZ is already bounded by the int16 cast in
-       * the scale-refresh loop, and a real take-up moves the carriage tens of
-       * counts in total, so a 100-tick bucket has orders of magnitude of
-       * headroom. A probe is not worth saturation logic in a 100 kHz ISR. */
-      shared->elsStop.diagTrace[bucket] = (int16_t)(shared->elsStop.diagTrace[bucket] + dZ);
-    }
-
-    shared->elsStop.diagNetCounts += dZ;
-    if (dZ != 0) {
-      shared->elsStop.diagSettleTicks = (int32_t)data->diagCaptureTick;
-    }
-
-    data->diagCaptureTick++;
-    if (data->diagCaptureTick >= (uint32_t)ELS_DIAG_TRACE_BUCKETS * ELS_DIAG_BUCKET_TICKS) {
+    if (dServo != 0) {
+      shared->elsStop.diagCaptureTicks = (uint16_t)data->diagCaptureTick;
+      shared->elsStop.diagEndReason    = ELS_DIAG_END_PULSE;
       data->diagState = 0;
       shared->elsStop.diagSeq++;   /* publish LAST: the seq bump is the ack that the block is complete and readable */
+    } else {
+      uint32_t bucket = data->diagCaptureTick / ELS_DIAG_BUCKET_TICKS;
+      if (bucket < (uint32_t)ELS_DIAG_TRACE_BUCKETS) {
+        /* int16 per bucket. Per-tick dZ is bounded by the int16 cast in the
+         * scale-refresh loop and a settle tail is single-digit counts, so a
+         * 10-tick bucket has orders of magnitude of headroom. A probe is not
+         * worth saturation logic in a 100 kHz ISR. */
+        shared->elsStop.diagTrace[bucket] = (int16_t)(shared->elsStop.diagTrace[bucket] + dZ);
+      }
+
+      shared->elsStop.diagNetCounts += dZ;
+      if (dZ != 0) {
+        shared->elsStop.diagSettleTicks = (int32_t)data->diagCaptureTick;
+      }
+
+      data->diagCaptureTick++;
+      if (data->diagCaptureTick >= (uint32_t)ELS_DIAG_TRACE_BUCKETS * ELS_DIAG_BUCKET_TICKS) {
+        /* Ran out of buckets before the servo moved again. The capture did NOT
+         * finish measuring: report that rather than letting a truncated trace
+         * pass for a complete one. */
+        shared->elsStop.diagCaptureTicks = (uint16_t)data->diagCaptureTick;
+        shared->elsStop.diagEndReason    = ELS_DIAG_END_WINDOW;
+        data->diagState = 0;
+        shared->elsStop.diagSeq++;
+      }
     }
   }
 #endif

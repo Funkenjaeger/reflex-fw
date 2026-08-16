@@ -114,8 +114,14 @@ int main(void)
           "protocolVersion is 2 (scratchpad map)");
 
 #ifdef ELS_DIAG_SCRATCH
-    check(data.shared.elsStop.diagSchema == ELS_DIAG_SCHEMA_TAKEUP_SETTLE,
-          "flagged build advertises the take-up settle probe");
+    /* Pinned to a SPECIFIC schema, not "any nonzero". A probe revision changes
+     * what the block's fields mean, and reflex-ui mirrors those meanings -- so
+     * bumping it should cost somebody a deliberate edit here rather than sliding
+     * through green. This caught the v1 -> v2 bump on 2026-08-16. */
+    check(data.shared.elsStop.diagSchema == ELS_DIAG_SCHEMA_TAKEUP_SETTLE_V2,
+          "flagged build advertises the take-up settle probe (v2)");
+    check(data.shared.elsStop.diagEndReason == 0,
+          "end reason starts cleared (no stale verdict beside a fresh trace)");
     check(data.shared.elsStop.diagBucketTicks > 0,
           "flagged build publishes bucket width (host must not assume the ISR rate)");
     check(data.shared.elsStop.diagBucketCount == ELS_DIAG_TRACE_BUCKETS,
