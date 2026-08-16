@@ -18,7 +18,7 @@ This project (along with the corresponding UI SW project) was hard forked from t
 
 * Utilizes **STM32CubeMX** for hardware configuration (.ioc file included)
 * Modular firmware structure with FreeRTOS support
-* Supports ST‑Link V2 and Raspberry Pi + OpenOCD programming
+* Programmed over SWD with an ST‑Link V2
 * Optimized for high-speed encoder + stepper/servo motor control
 * Includes a native FW+lathe emulator for hardware-free testing with the Python GUI
 
@@ -26,41 +26,85 @@ This project (along with the corresponding UI SW project) was hard forked from t
 
 ## 🛠️ Build & Flash
 
+Build and flash on **the machine with the ST-Link plugged into it**. For this
+project that is the Pi that also runs the UI, which is perfectly capable of
+compiling the firmware — and doing both in one place means the binary on the
+target cannot be a different revision from the checkout in front of you.
+`git rev-parse HEAD` there *is* what is flashed.
+
 ### Requirements
 
-* CMake & C/C++ toolchain (e.g. `arm-none-eabi-gcc`, `make`)
-* ST-Link v2 or Raspberry Pi with OpenOCD
-
-### Build
-
 ```bash
-git clone https://github.com/Funkenjaeger/reflex-fw.git
-cd reflex-fw
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+sudo apt install gcc-arm-none-eabi cmake build-essential openocd
 ```
 
-### Clean
+Plus an ST-Link v2 on USB. The `openocd` package installs udev rules granting
+the `plugdev` group access, so flashing needs no `sudo`.
+
+### Build and flash
 
 ```bash
-rm -rf build
+./scripts/flash.sh
 ```
 
-### Flash
+That builds, flashes over SWD, and records what it did.
 
-* **ST‑Link V2**:
+> **Power-cycle the controller after flashing.** A reset alone does not reliably
+> start the new firmware on this board. openocd's `Verified OK` confirms the
+> flash *contents*, not what the core is *executing* — so programming and
+> verification both report success while the machine keeps running the previous
+> firmware, silently and with no error anywhere. Confirm from the reflex-ui log
+> that `Firmware register protocol version N (expected N)` matches what you
+> flashed before believing it took.
 
-  ```bash
-  st-flash --format ihex write build/reflex-fw.hex
-  ```
+```bash
+./scripts/flash.sh --diag        # with the ELS settle-trace probe
+./scripts/flash.sh --dry-run     # everything except the write
+./scripts/build.sh               # build only, no flashing
+./scripts/build.sh --diag --clean
+```
 
-* **Raspberry Pi + OpenOCD**:
+**It rebuilds every time by default.** `--no-build` opts out. A stale binary is
+the easiest mistake to make and the hardest to notice; rebuilding costs seconds.
 
-  ```bash
-  openocd -f ./raspberry.cfg
-  ```
+**`--host NAME` builds here and flashes there** over SSH, for the case where the
+probe host genuinely cannot build. It adds a copy and a checksum — a transfer
+that can silently truncate is worth verifying before it is written to the
+controller of a machine with moving parts. Prefer the local path: it makes that
+whole failure mode, and the version ambiguity that comes with it, not exist.
 
-  The default `raspberry.cfg` configures SWD over GPIO pins 24/25 + GND. Ensure GND wiring is the **same length** as SWCLK/SWDIO for reliability. Modify the GPIO pins in `raspberry.cfg` if needed.
+**Two variants, two build directories.** `build/` is the release firmware.
+`build-diag/` adds `-DELS_DIAG_SCRATCH`, compiling in the ELS settle-trace probe
+— **never** put that on `dev-staging`, `dev` or `main`. They are separate
+directories so the flag can never depend on what the last `cmake` invocation
+happened to say. At runtime the `elsStop.diagSchema` register tells you which one
+is running, and the UI logs it at connect.
+
+**Every flash is recorded** in `~/firmware/flashed.json` on the probe host: UTC
+timestamp, variant, git revision, whether the tree was dirty, and the ELF's MD5.
+Working out what firmware was on this lathe once took an afternoon of forensics
+across build-artifact timestamps; this makes it a lookup.
+
+### Underneath
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
+        -c 'transport select swd' -c 'program build/reflex-fw.elf verify reset exit'
+```
+
+OpenOCD rather than `st-flash`: it takes the ELF directly (load addresses come
+from the headers, so there is no `--format`/base-address to get wrong), it is
+markedly more tolerant of ST-Link **clones**, and it is the same tool that would
+drive a GPIO-bitbanged probe if the boards are ever respun without a dongle.
+
+> Bitbanging SWD from a Raspberry Pi's GPIO used to be documented here via
+> `raspberry.cfg`. It has been removed: that config uses OpenOCD's
+> `bcm2835gpio` driver, which memory-maps the GPIO block on the SoC — and the
+> Pi 5 moved GPIO onto the RP1 southbridge, so the driver has nothing to map and
+> cannot work there at all. It was never used in practice. `raspberrypi5.cfg`
+> holds an untested `linuxgpiod` equivalent for whenever the boards get respun;
+> read its header before trusting it.
 
 ---
 

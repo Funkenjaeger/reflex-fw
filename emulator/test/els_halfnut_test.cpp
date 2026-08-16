@@ -325,6 +325,88 @@ static void testCancelDuringEngaging() {
     CHECK(std::abs(p.getCarriageMM() - z0) < 1e-12, "carriage untouched");
 }
 
+/* T8: setHalfNutEngaged() is an explicit STATE request, and every case below
+ * is one a toggle gets WRONG.
+ *
+ * This is what backs the `halfnut open` / `halfnut close` stdin commands
+ * (main.cpp). Those exist so a system test can stage "half-nut open + Cut +
+ * hand nudge" -- the third machine state the emulator could not represent, and
+ * the reason the 2026-08-08 take-up gate defect was unreachable by any test.
+ * A test that has to know the current state to ask for the next one is a test
+ * that can silently ask for the opposite, which is exactly how a fixture ends
+ * up agreeing with a broken gate.
+ *
+ * MUTATION: implement setHalfNutEngaged() as
+ *   `if (engaged != (state == ENGAGED)) requestHalfNutToggle();`
+ * -- the obvious "toggle if it disagrees" reading -- and the ENGAGING cases
+ * below go red: a close request cancels the in-flight engage (it reads ENGAGING
+ * as "not engaged", toggles, and requestHalfNutToggle's cancel branch fires),
+ * and an open request leaves it ENGAGING. */
+static void testExplicitStateRequests() {
+    printf("T8: setHalfNutEngaged() is idempotent and state-directed\n");
+
+    /* close while ENGAGING must NOT cancel -- contrast with T7, which is the
+     * same situation reached through requestHalfNutToggle(). */
+    {
+        LathePhysics p(makeConfig(10.0 * GRID + 0.6 * GRID));
+        warmGate(p, +1);
+        p.setHalfNutEngaged(true);
+        pulseTrain(p, +1, 50, 3, true);
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGING, "engage request entered ENGAGING");
+        g_log.clear();
+        p.setHalfNutEngaged(true);           /* asking again for what is coming */
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGING, "still ENGAGING, NOT cancelled");
+        CHECK(!logContains("CANCELLED"), "no cancel logged");
+        pulseTrain(p, +1, 2 * STEPS_PER_GRID, 2, true);
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGED, "and it still completes");
+    }
+
+    /* open while ENGAGING must cancel: open means open. */
+    {
+        LathePhysics p(makeConfig(10.0 * GRID + 0.6 * GRID));
+        warmGate(p, +1);
+        p.setHalfNutEngaged(true);
+        pulseTrain(p, +1, 50, 3, true);
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGING, "in ENGAGING");
+        p.setHalfNutEngaged(false);
+        CHECK(p.getHalfNutState() == LathePhysics::DISENGAGED, "open cancels an in-flight engage");
+        pulseTrain(p, +1, 2 * STEPS_PER_GRID, 2, true);
+        CHECK(p.getHalfNutState() == LathePhysics::DISENGAGED, "and stays open");
+    }
+
+    /* close while already ENGAGED must be a no-op -- a toggle here would OPEN
+     * the nut mid-cut, silently uncoupling the carriage. */
+    {
+        LathePhysics p(makeConfig(10.0 * GRID));
+        p.setHalfNutEngaged(true);           /* stationary: snap path */
+        p.tick(DT, &g_shared);
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGED, "stationary close engages");
+        p.setHalfNutEngaged(true);
+        p.tick(DT, &g_shared);
+        CHECK(p.getHalfNutState() == LathePhysics::ENGAGED, "closing an engaged nut changes nothing");
+
+        p.setHalfNutEngaged(false);
+        p.tick(DT, &g_shared);
+        CHECK(p.getHalfNutState() == LathePhysics::DISENGAGED, "open disengages");
+        p.setHalfNutEngaged(false);
+        p.tick(DT, &g_shared);
+        CHECK(p.getHalfNutState() == LathePhysics::DISENGAGED, "opening an open nut changes nothing");
+    }
+
+    /* open must also withdraw an engage request that has been made but not yet
+     * serviced by a tick -- otherwise "open" is followed one tick later by the
+     * nut closing itself, which is the opposite of what was asked. */
+    {
+        LathePhysics p(makeConfig(10.0 * GRID));
+        p.setHalfNutEngaged(true);           /* request pending, no tick yet */
+        p.setHalfNutEngaged(false);          /* changed our mind before it ran */
+        p.tick(DT, &g_shared);
+        p.tick(DT, &g_shared);
+        CHECK(p.getHalfNutState() == LathePhysics::DISENGAGED,
+              "an unserviced engage request is withdrawn, not merely overridden");
+    }
+}
+
 int main() {
     memset(&g_shared, 0, sizeof(g_shared));  /* servo.currentSpeed == 0 */
     printf("=== half-nut engagement physics tests ===\n");
@@ -335,6 +417,7 @@ int main() {
     testEngagingDecaysToSnap();
     testNearestGridPosition();
     testCancelDuringEngaging();
+    testExplicitStateRequests();
     printf("=== %s (%d failures) ===\n", failures == 0 ? "ALL PASS" : "FAILURES", failures);
     return failures == 0 ? 0 : 1;
 }

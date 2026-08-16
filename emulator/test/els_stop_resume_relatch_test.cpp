@@ -61,6 +61,21 @@
  * fixed. It is registered in CTest deliberately, as a reproduction.
  *
  * Build/run: `els_stop_resume_relatch_test` CTest target (see CMakeLists).
+ *
+ * ------------------------------------------------------------------------
+ * STATUS UPDATE — the defect described above is FIXED.
+ *
+ * Core/Src/Ramps.c now reads elsStop.hysteresis in the trigger gate: after a
+ * resume the axis must sit >= hysteresis counts CLEAR of stopPosition, on
+ * the retract side, before shouldStop is allowed to latch again. The two
+ * DEFECT assertions were written to fail and now PASS. They are left exactly
+ * as authored — a repro that flips green is the proof, not noise.
+ *
+ * The DEFECT cases inherit hysteresis = 500 from the fixture, so they are
+ * already gate-dependent. The POSITIVE CONTROL section at the bottom of
+ * main() states that dependence explicitly rather than by inheritance, and
+ * pins the values the resume path is supposed to produce.
+ * ------------------------------------------------------------------------
  */
 
 extern "C" {
@@ -144,7 +159,7 @@ struct Rig {
     int32_t            spindleCnt;
     int32_t            zCnt;
 
-    void init(uint32_t backlashSteps) {
+    void init(uint32_t backlashSteps, int32_t hysteresisCounts = 500) {
         std::memset(&data, 0, sizeof(data));
         std::memset(tim,  0, sizeof(tim));
         std::memset(htim, 0, sizeof(htim));
@@ -180,12 +195,12 @@ struct Rig {
         data.shared.elsStop.threadPitchSteps = 533.333f;
         data.shared.elsStop.zCountsPerPitch  = 846.667f;
         data.shared.elsStop.backlashSteps    = backlashSteps;
-        data.shared.elsStop.hysteresis       = 500;  /* SW asks for 500 counts of retract.
-                                                      * Firmware never reads this field —
-                                                      * setting it here documents that even
-                                                      * a configured hysteresis changes
-                                                      * nothing. Read-only use; the field
-                                                      * itself is untouched in Core/. */
+        data.shared.elsStop.hysteresis       = hysteresisCounts;
+                                                    /* Counts of retract SW demands before the
+                                                     * stop may re-arm. Firmware reads this in
+                                                     * the Ramps.c:403 trigger gate; 0 disables
+                                                     * the gate and restores the pre-fix
+                                                     * behavior exactly. */
         data.shared.elsStop.enable           = 0;
 
         /* Seed the raw-counter shadow so the first pass sees a zero delta on
@@ -238,9 +253,10 @@ struct Outcome {
  */
 static Outcome runResumeScenario(int32_t zAtResume, uint32_t backlashSteps,
                                  bool moveStopPosBeforeResume = false,
-                                 int32_t newStopPos = 0) {
+                                 int32_t newStopPos = 0,
+                                 int32_t hysteresisCounts = 500) {
     Rig rig;
-    rig.init(backlashSteps);
+    rig.init(backlashSteps, hysteresisCounts);
     Outcome o{};
     o.zAtResume = zAtResume;
 
@@ -381,6 +397,65 @@ int main() {
            (unsigned)isoTakeup.takeupPendingAfterPass);
     report("isolation", isoTakeup);
     if (!isoTakeup.takeupRan) failures++;
+
+    /* ---------------- POSITIVE CONTROL: firmware hysteresis gate -------- */
+    /* Same shape as the DEFECT runs — Z left just past the stop when SW writes
+     * active = 0 — but hysteresis is stated explicitly rather than inherited
+     * from the fixture. With HYST > 0 and clearance = Z_PAST - stopPosition =
+     * -5 (i.e. still past the stop, nowhere near HYST), the trigger gate must
+     * refuse to re-latch, so the 1->0 edge survives the pass and the resume
+     * path runs.
+     *
+     * Expected takeup magnitude, derived the same way Ramps.c:465-473 does it:
+     *   cuttingDir = (syncRatioNum > 0) ? +1 : -1        -> syncRatioNum = -2 -> -1
+     *   flipped if threadPitchSteps * zCountsPerPitch < 0 -> 533.3 * 846.7 > 0 -> no flip
+     *   stepsToGo += cuttingDir * backlashSteps           -> 0 + (-1 * 300) = -300
+     * NOTE: the firmware adds cuttingDir * backlashSteps, it does not negate
+     * it. -(cuttingDir * backlashSteps) would be +300 and is NOT what the
+     * resume path produces.
+     *
+     * The two effects are pinned in separate runs because they live in
+     * mutually exclusive branches of Ramps.c:461: backlashSteps != 0 defers
+     * the phase correction until after takeup + settle (lastIdealAdvance is
+     * still the sentinel at the end of the resume pass), and backlashSteps ==
+     * 0 applies it inline. One run cannot show both on the same pass. */
+    const int32_t  HYST            = 500;
+    const int32_t  EXPECTED_TAKEUP = -(int32_t)BACKLASH;   /* cuttingDir(-1) * 300 */
+
+    printf("\n-- POSITIVE CONTROL: hysteresis gate (hysteresis = %d, Z left at %d) --\n",
+           (int)HYST, (int)Z_PAST);
+
+    Outcome gateTakeup = runResumeScenario(Z_PAST, BACKLASH, false, 0, HYST);
+    printf("[%s] GATE: preconditions armed\n", gateTakeup.armedOk ? "PASS" : "FAIL");
+    if (!gateTakeup.armedOk) failures++;
+    printf("[%s] GATE: expected same-pass re-latch SUPPRESSED (active == 0), observed %u\n",
+           (gateTakeup.activeAfterPass == 0) ? "PASS" : "FAIL",
+           (unsigned)gateTakeup.activeAfterPass);
+    if (gateTakeup.activeAfterPass != 0) failures++;
+    printf("[%s] GATE: expected backlash takeup to run (takeupPending == 1), observed %u\n",
+           gateTakeup.takeupRan ? "PASS" : "FAIL",
+           (unsigned)gateTakeup.takeupPendingAfterPass);
+    if (!gateTakeup.takeupRan) failures++;
+    printf("[%s] GATE: expected servo.stepsToGo == %d, observed %d\n",
+           (gateTakeup.stepsToGoAfter == EXPECTED_TAKEUP) ? "PASS" : "FAIL",
+           (int)EXPECTED_TAKEUP, (int)gateTakeup.stepsToGoAfter);
+    if (gateTakeup.stepsToGoAfter != EXPECTED_TAKEUP) failures++;
+    report("gate/takeup", gateTakeup);
+
+    Outcome gatePhase = runResumeScenario(Z_PAST, 0, false, 0, HYST);
+    printf("[%s] GATE: preconditions armed (phase-correction branch)\n",
+           gatePhase.armedOk ? "PASS" : "FAIL");
+    if (!gatePhase.armedOk) failures++;
+    printf("[%s] GATE: expected same-pass re-latch SUPPRESSED (active == 0), observed %u\n",
+           (gatePhase.activeAfterPass == 0) ? "PASS" : "FAIL",
+           (unsigned)gatePhase.activeAfterPass);
+    if (gatePhase.activeAfterPass != 0) failures++;
+    printf("[%s] GATE: expected phase correction to run (lastIdealAdvance off the %.0e "
+           "sentinel), observed %s\n",
+           gatePhase.phaseCorrectionRan ? "PASS" : "FAIL", (double)SENTINEL,
+           gatePhase.phaseCorrectionRan ? "it ran" : "it did NOT run");
+    if (!gatePhase.phaseCorrectionRan) failures++;
+    report("gate/phase", gatePhase);
 
     /* ---------------- Diagnosis line ----------------------------------- */
     printf("\n-- mechanism --\n");
