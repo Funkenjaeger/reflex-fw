@@ -49,6 +49,14 @@ the `plugdev` group access, so flashing needs no `sudo`.
 
 That builds, flashes over SWD, and records what it did.
 
+> **Power-cycle the controller after flashing.** A reset alone does not reliably
+> start the new firmware on this board. openocd's `Verified OK` confirms the
+> flash *contents*, not what the core is *executing* — so programming and
+> verification both report success while the machine keeps running the previous
+> firmware, silently and with no error anywhere. Confirm from the reflex-ui log
+> that `Firmware register protocol version N (expected N)` matches what you
+> flashed before believing it took.
+
 ```bash
 ./scripts/flash.sh --diag        # with the ELS settle-trace probe
 ./scripts/flash.sh --dry-run     # everything except the write

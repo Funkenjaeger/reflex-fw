@@ -143,11 +143,33 @@ MANIFEST="{\"utc\":\"$STAMP\",\"variant\":\"$VARIANT\",\"rev\":\"$REV\",\"dirty\
 "${RUN[@]}" "printf '%s\n' '$MANIFEST' >> ~/firmware/flashed.json"
 
 echo
-echo "flashed  ${VARIANT^^}  rev ${REV}$([ "$DIRTY" = true ] && echo " (dirty)")"
+echo "written  ${VARIANT^^}  rev ${REV}$([ "$DIRTY" = true ] && echo " (dirty)")"
 echo "  recorded in ${WHERE}:~/firmware/flashed.json"
+cat <<'EOF'
+
+  ############################################################
+  #  NOW POWER-CYCLE THE CONTROLLER. THIS IS NOT OPTIONAL.   #
+  ############################################################
+
+  openocd's "Verified OK" confirms the FLASH CONTENTS match the image. It
+  says nothing about what the core is EXECUTING, and on this board a reset
+  alone does not reliably start the new firmware -- observed 2026-08-16.
+
+  The failure is silent and convincing: programming and verification both
+  report success, the UI reconnects, and the machine goes on running the
+  PREVIOUS firmware with no error anywhere. That cost an hour of chasing a
+  build bug that did not exist.
+
+  After the power cycle, confirm from the reflex-ui log that the firmware
+  you flashed is the firmware that is running:
+
+    Firmware register protocol version N (expected N)
+EOF
 if [ "$VARIANT" = diagnostic ]; then
-    echo
-    echo "  The UI reconnects on its own after the reset. Confirm it logs"
-    echo "  'ELS diagnostic recorder active' -- 'dormant' means the flash did not"
-    echo "  take, or reflex-ui on that machine predates the recorder."
+    cat <<'EOF'
+    ELS diagnostic recorder active: schema=...
+
+  'dormant' or a protocol mismatch means the new image is not running --
+  power-cycle again rather than assuming it took.
+EOF
 fi
