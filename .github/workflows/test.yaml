@@ -12,8 +12,15 @@ name: Test
 # the push event, one for the pull_request event). That is accepted: branch
 # protection keys off the pull_request run, and the two jobs are cheap and run
 # in parallel.
+# `branches: ['**']` is EVERY branch, which keeps the intent above intact --
+# main, dev, dev-staging, integration and every feature branch, slashes and all.
+# What it excludes is TAGS. A bare `push:` fires on tag pushes too, so pushing
+# an archive/* tag ran the whole suite against a historical tree and mailed out
+# the result. Tags here are archival (archive/*) or cut by semantic-release;
+# neither is a thing to test, and a red run against frozen history is pure noise.
 on:
   push:
+    branches: ['**']
   pull_request:
 
 permissions:
