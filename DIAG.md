@@ -62,6 +62,64 @@ Schema ids are a wire contract: **append only, never renumber.** A retired id is
 never reissued to a different probe — a stale reader that still recognises an old
 id must not silently accept new data under it.
 
+## Code layout — the pattern
+
+Probes follow a fixed shape so that adding one is mechanical and `Ramps.c` never
+learns which probe it is calling.
+
+| File | Role |
+|---|---|
+| `Core/Inc/els_diag.h` | dispatch. Includes the selected probe's header, or supplies no-op entry points. **Always** included, from the foot of `Ramps.h`. |
+| `Core/Inc/els_diag_<name>.h` | one probe. Its state machine, its constants, its trace geometry. |
+| `Core/Inc/Ramps.h` | the scratchpad registers and schema ids (register contract), plus `elsDiagCtx_t` |
+| `Core/Src/Ramps.c` | **call sites only** — no probe logic, and no `#ifdef` |
+
+Naming: files `els_diag_*.h`, functions `elsDiag*`, matching the existing
+`els_slip.h` / `els_backlash_cal.h` modules this pattern is modelled on.
+
+**Every probe implements the same five entry points.** That fixed contract is
+what keeps `Ramps.c` probe-agnostic:
+
+| Entry point | Called at |
+|---|---|
+| `elsDiagInit(ctx, stop)` | `RampsStart`. Publish `diagSchema` + geometry, clear the block |
+| `elsDiagArm(ctx, stop)` | take-up initiation, before any pulses |
+| `elsDiagCaptureStart(ctx)` | first tick at which commanded motion is complete |
+| `elsDiagCapturing(ctx)` | cheap predicate — see below |
+| `elsDiagTick(ctx, stop, dZ, dServo)` | once per ISR tick while capturing |
+
+**`elsDiagCapturing` must stay trivial, and the ISR must call it before
+computing `elsDiagTick`'s arguments.** C evaluates arguments before the callee
+can early-return, so an unguarded call makes every tick pay for `dZ` (two array
+indexings and a multiply) and `dServo` (a subtract) whether or not a capture is
+running. That cost lands in the ISR a timing probe exists to measure, which
+makes it self-defeating rather than merely wasteful. Measured: **+128 bytes of
+ISR** when the guard was missing, versus 20 bytes *smaller* than the pre-refactor
+baseline with it.
+
+**Call-site placement is not the probe's to choose.** The bodies live in the
+probe header; the instants do not. Each hook sits at one specific point in the
+tick — `elsDiagArm` clears at initiation precisely because the capture-start tick
+is the one being measured — and a relocated hook measures something else. The
+entry-point comments carry that constraint, because it is no longer visible from
+the code surrounding the call.
+
+**Release cost is no code.** The no-op entry points, `elsDiagCapturing` returning
+a constant `false`, let the whole guarded block vanish. Verified by comparing the
+release image across the extraction: `.text` identical at 36028 bytes, `.data`
+identical, and the entire instruction-level difference is one commutative
+operand swap the compiler chose (`vfma.f32 s14,s12,s15` → `s14,s15,s12`). `.bss`
+grows 8 bytes for the always-present `elsDiagCtx_t`, which relocates later RAM
+addresses — so the image is functionally identical, not bit-identical.
+
+`elsDiagCtx_t` sits **last** in `rampsHandler_t` on purpose: carrying it in a
+release build then cannot shift the offset of any field above it.
+
+This is dispatch and no-ops, **not a shared trace framework**. With one probe in
+existence, factoring out "common" trace machinery would be inventing a seam
+rather than finding one. When a second probe lands, whatever genuinely repeats
+can move into `els_diag.h` — that is the open loop, not an oversight.
+
 ## Registry
 
 ### `takeup-settle-v2` — schema 2 — **one-off, retained as a worked example**
@@ -107,9 +165,11 @@ error that names the replacement.
    automatically — there is no second list to update.
 2. **Add an arm to the `#error` chain** in `Ramps.h` so the id is recognised.
    Without it the build refuses, by design.
-3. **Write the capture code** under `#if ELS_DIAG_PROBE == ELS_DIAG_SCHEMA_<NAME>`.
-   Shared plumbing keys off the derived `ELS_DIAG_SCRATCH`; per-probe code keys
-   off `ELS_DIAG_PROBE`.
+3. **Write the probe** in `Core/Inc/els_diag_<name>.h`, implementing all five
+   entry points, and add an arm to the dispatch `#if` in `els_diag.h` so it gets
+   included. Nothing goes in `Ramps.c`: the call sites are already there and are
+   probe-agnostic. See "Code layout" above — especially the `elsDiagCapturing`
+   guard, which is load-bearing for ISR cost.
 4. **Add a test target** in `emulator/CMakeLists.txt` mirroring
    `els_diag_scratch_takeup_settle_v2_test`, and an assertion arm in
    `emulator/test/els_diag_scratch_test.cpp`. Both are load-bearing: the target

@@ -110,6 +110,19 @@
 #define ELS_DIAG_END_PULSE  1   /* servo drove again -- settling is over */
 #define ELS_DIAG_END_WINDOW 2   /* ran out of buckets while still quiet-or-moving */
 
+/* Probe capture state, held in rampsHandler_t. Deliberately generic and shared
+ * by every probe rather than per-probe: it is two words of ISR-owned scratch,
+ * and a per-probe union here would change rampsHandler_t's size from build to
+ * build for no benefit. A probe needing more than this can keep its own statics
+ * in its own header.
+ *
+ * 0 = idle, 1 = armed, 2 = capturing -- the states the existing probe uses; a
+ * probe is free to mean something else by them. */
+typedef struct {
+  uint16_t state;
+  uint32_t captureTick;   // ISR ticks since capture start
+} elsDiagCtx_t;
+
 
 typedef struct {
   int32_t delta;
@@ -277,13 +290,16 @@ typedef struct {
    * say with it — "moved 20 counts, none of them ours" is a much better refusal
    * message than the current one, and that is a UI change, not a firmware one. */
   elsSlipAccum_t elsSlip;
-#ifdef ELS_DIAG_SCRATCH
-  /* Take-up settle-trace capture state. Non-Modbus, ISR-owned, and compiled out
-   * entirely in a release build along with every write to the scratchpad.
-   * 0 = idle, 1 = armed at take-up initiation, 2 = capturing. */
-  uint16_t diagState;
-  uint32_t diagCaptureTick;   // ISR ticks since capture start
-#endif
+  /* Diagnostic probe capture state. Non-Modbus, ISR-owned, and untouched by a
+   * release build -- the no-op entry points in els_diag.h ignore it.
+   *
+   * UNCONDITIONAL, and LAST IN THE STRUCT, both on purpose. Unconditional so
+   * every call site in Ramps.c can pass &data->diag with no #ifdef; last so
+   * that carrying it in a release build cannot shift the offset of any field
+   * above it. It is zero-initialised handler RAM, so it lives in .bss and never
+   * reaches the .bin -- which is why this refactor left the release image
+   * byte-identical. Keep it here at the tail. */
+  elsDiagCtx_t diag;
 } rampsHandler_t;
 
 extern modbusHandler_t RampsModbusData;
@@ -300,5 +316,10 @@ _Noreturn void servoEnableTask(void *argument);
 
 //static void timServoEnableOnCallback(xTimerHandle pxTimer);
 //static void timServoEnableOffCallback(xTimerHandle pxTimer);
+
+/* LAST, and it has to be. els_diag.h's entry points take elsStop_t* and
+ * elsDiagCtx_t*, so it cannot be included until both exist -- which is why this
+ * sits at the foot of the header rather than up with the other includes. */
+#include "els_diag.h"
 
 #endif
