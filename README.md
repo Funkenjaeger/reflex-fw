@@ -1,3 +1,16 @@
+> ## ⚠️ Deprecated — development has moved to the `reflex` monorepo
+>
+> **This repository is archived and no longer developed.** On 2026-08-17 the firmware (this repository)
+> and the UI ([reflex-ui](https://github.com/Funkenjaeger/reflex-ui)) were merged into a single repository,
+> with the full history of both preserved:
+>
+> **→ https://github.com/Funkenjaeger/reflex** — this code now lives under `fw/`.
+>
+> Nothing here will be updated. Branch names are unchanged there; this repository's tags carry a `fw-` prefix.
+> This archive is kept read-only as the historical record and the rollback point for the merge.
+
+---
+
 # Rotary Controller (F4)
 
 [![Discord](https://img.shields.io/discord/1386014070632878100?style=social)](https://discord.gg/EDtgj7Yayr) [![Shop at Provvedo](https://img.shields.io/badge/Shop-Provvedo-blue?logo=shopify&style=flat-square)](https://www.provvedo.com/shop)
