@@ -1,3 +1,16 @@
+> ## ⚠️ Deprecated — development has moved to the `reflex` monorepo
+>
+> **This repository is archived and no longer developed.** On 2026-08-17 the firmware (this repository)
+> and the UI ([reflex-ui](https://github.com/Funkenjaeger/reflex-ui)) were merged into a single repository,
+> with the full history of both preserved:
+>
+> **→ https://github.com/Funkenjaeger/reflex** — this code now lives under `fw/`.
+>
+> Nothing here will be updated. Branch names are unchanged there; this repository's tags carry a `fw-` prefix.
+> This archive is kept read-only as the historical record and the rollback point for the merge.
+
+---
+
 # Reflex Firmware
 
 This repository contains the **firmware** for a digital controller board based on the **STM32F411** microcontroller. It provides Digital Read Out (DRO) and Electronic Leadscrew (ELS) functionality for lathes when integrated with the corresponding [Reflex UI software](https://github.com/Funkenjaeger/reflex-ui).
